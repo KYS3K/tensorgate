@@ -1,0 +1,32 @@
+# Binaries
+/bin/
+/dist/
+# `go build ./cmd/tensorgate` from the repo root drops the binary here
+/tensorgate
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries (go test -c) and profiles
+*.test
+*.out
+*.prof
+coverage.*
+
+# Local workspace file; each developer has their own
+go.work
+go.work.sum
+
+# Local secrets and env (API keys for upstream models)
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
