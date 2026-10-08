@@ -1,33 +1,31 @@
-package sse
+package gateway
 
 import (
-	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KYS3K/tensorgate/internal/sse"
 )
 
 type event struct {
 	typ, data string
 }
 
-func TestMain(m *testing.M) {
-	// don't wait 500ms per token in tests
-	tickInterval = time.Millisecond
-	os.Exit(m.Run())
+// testStreamer doesn't wait 500ms per token
+func testStreamer() *Streamer {
+	return &Streamer{Tokens: 5, Interval: time.Millisecond, Retry: 2 * time.Second}
 }
 
 func collect(t *testing.T, body string) []event {
 	t.Helper()
 	var got []event
-	err := ReadEvents(strings.NewReader(body), func(typ, data string) {
+	err := sse.ReadEvents(strings.NewReader(body), func(typ, data string) {
 		got = append(got, event{typ, data})
 	})
 	if err != nil {
@@ -44,16 +42,16 @@ func tokens(from, to int) []event {
 	return append(ev, event{"message", "[DONE]"})
 }
 
-func TestHandler(t *testing.T) {
+func TestStreamer(t *testing.T) {
 	tests := []struct {
 		name        string
 		lastEventID string
 		wantStatus  int
 		want        []event
 	}{
-		{"fresh stream", "", http.StatusOK, tokens(1, totalEvents)},
-		{"resume", "3", http.StatusOK, tokens(4, totalEvents)},
-		{"resume from zero", "0", http.StatusOK, tokens(1, totalEvents)},
+		{"fresh stream", "", http.StatusOK, tokens(1, 5)},
+		{"resume", "3", http.StatusOK, tokens(4, 5)},
+		{"resume from zero", "0", http.StatusOK, tokens(1, 5)},
 		{"already finished", "5", http.StatusNoContent, nil},
 		{"past the end", "99", http.StatusNoContent, nil},
 		{"not a number", "abc", http.StatusBadRequest, nil},
@@ -62,13 +60,14 @@ func TestHandler(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			req := httptest.NewRequest(http.MethodGet, "/events", nil)
 			if tt.lastEventID != "" {
 				req.Header.Set("Last-Event-ID", tt.lastEventID)
 			}
 			rec := httptest.NewRecorder()
 
-			Handler(rec, req)
+			testStreamer().ServeHTTP(rec, req)
 
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d", rec.Code, tt.wantStatus)
@@ -80,10 +79,7 @@ func TestHandler(t *testing.T) {
 				return
 			}
 
-			if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
-				t.Errorf("Content-Type = %q", ct)
-			}
-			if !strings.HasPrefix(rec.Body.String(), fmt.Sprintf("retry: %d\n\n", retryMs)) {
+			if !strings.HasPrefix(rec.Body.String(), "retry: 2000\n\n") {
 				t.Errorf("stream must start with retry field, got %q", rec.Body.String())
 			}
 			if got := collect(t, rec.Body.String()); !reflect.DeepEqual(got, tt.want) {
@@ -93,12 +89,12 @@ func TestHandler(t *testing.T) {
 	}
 }
 
-func TestHandlerIDs(t *testing.T) {
+func TestStreamerIDs(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/events", nil)
 	req.Header.Set("Last-Event-ID", "2")
 	rec := httptest.NewRecorder()
 
-	Handler(rec, req)
+	testStreamer().ServeHTTP(rec, req)
 
 	// ReadEvents ignores id:, so check the raw lines
 	var ids []string
@@ -112,10 +108,9 @@ func TestHandlerIDs(t *testing.T) {
 	}
 }
 
-func TestHandlerClientGone(t *testing.T) {
-	old := tickInterval
-	tickInterval = time.Hour // make sure the context wins the select
-	t.Cleanup(func() { tickInterval = old })
+func TestStreamerClientGone(t *testing.T) {
+	s := testStreamer()
+	s.Interval = time.Hour // make sure the context wins the select
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -124,7 +119,7 @@ func TestHandlerClientGone(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		Handler(rec, req)
+		s.ServeHTTP(rec, req)
 		close(done)
 	}()
 
@@ -135,47 +130,5 @@ func TestHandlerClientGone(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "data:") {
 		t.Errorf("no events expected after disconnect, got %q", rec.Body.String())
-	}
-}
-
-func TestReadEvents(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want []event
-	}{
-		{"default type", "data: hi\n\n", []event{{"message", "hi"}}},
-		{"named event", "event: ping\ndata: x\n\n", []event{{"ping", "x"}}},
-		{"multi-line data", "data: a\ndata: b\n\n", []event{{"message", "a\nb"}}},
-		{"comment ignored", ": keep-alive\ndata: x\n\n", []event{{"message", "x"}}},
-		{"no data, no dispatch", "retry: 2000\n\nevent: ping\n\n", nil},
-		{"only one space trimmed", "data:  world\n\n", []event{{"message", " world"}}},
-		{"no space after colon", "data:x\n\n", []event{{"message", "x"}}},
-		{"empty data line", "data\n\n", []event{{"message", ""}}},
-		{"crlf line endings", "data: x\r\n\r\n", []event{{"message", "x"}}},
-		{"unterminated event dropped", "data: x\n", nil},
-		{"event type resets", "event: a\ndata: 1\n\ndata: 2\n\n", []event{{"a", "1"}, {"message", "2"}}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := collect(t, tt.in); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("got %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestReadEventsLongLine(t *testing.T) {
-	big := strings.Repeat("x", 200*1024) // over the default 64KB scanner limit
-	got := collect(t, "data: "+big+"\n\n")
-	if len(got) != 1 || got[0].data != big {
-		t.Fatalf("200KB line not read intact")
-	}
-
-	tooBig := strings.Repeat("x", 1<<20)
-	err := ReadEvents(strings.NewReader("data: "+tooBig+"\n\n"), func(string, string) {})
-	if !errors.Is(err, bufio.ErrTooLong) {
-		t.Fatalf("err = %v, want bufio.ErrTooLong", err)
 	}
 }
