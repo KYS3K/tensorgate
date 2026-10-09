@@ -20,6 +20,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /events", gateway.NewStreamer())
+	mux.Handle("POST /v1/chat/completions", gateway.NewCompletionsHandler())
 
 	// request contexts derive from baseCtx, so cancelling it on shutdown ends open SSE streams;
 	// otherwise Shutdown would wait for every stream to finish on its own
