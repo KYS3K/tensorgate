@@ -3,9 +3,11 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +18,7 @@ import (
 const hiMessages = `"messages":[{"role":"user","content":"hi"}]`
 
 func testCompletions() *CompletionsHandler {
-	return &CompletionsHandler{Tokens: 3, Interval: time.Millisecond}
+	return &CompletionsHandler{DefaultConfig: MockConfig{TTFT: 0, TPOT: time.Millisecond, Tokens: 3}}
 }
 
 func post(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder {
@@ -162,7 +164,7 @@ func TestCompletionsStream(t *testing.T) {
 
 func TestCompletionsStreamClientGone(t *testing.T) {
 	h := testCompletions()
-	h.Interval = time.Hour // make sure the context wins the select
+	h.DefaultConfig.TPOT = time.Hour // make sure the context wins the select
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -183,6 +185,101 @@ func TestCompletionsStreamClientGone(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "[DONE]") {
 		t.Errorf("stream must not finish after disconnect, got %q", rec.Body.String())
+	}
+}
+
+// streamContent joins the content deltas of a stream body
+func streamContent(t *testing.T, body string) string {
+	t.Helper()
+	var content strings.Builder
+	err := sse.ReadEvents(strings.NewReader(body), func(_, d string) {
+		if d == "[DONE]" {
+			return
+		}
+		delta := firstChoice(t, decodeMap(t, d))["delta"].(map[string]any)
+		s, _ := delta["content"].(string)
+		content.WriteString(s)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return content.String()
+}
+
+func TestCompletionsModesAgree(t *testing.T) {
+	for _, tokens := range []string{"1", "2", "5"} {
+		t.Run(tokens, func(t *testing.T) {
+			t.Parallel()
+			send := func(stream bool) *httptest.ResponseRecorder {
+				body := fmt.Sprintf(`{"stream":%t,%s}`, stream, hiMessages)
+				req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+				req.Header.Set("X-Mock-Tokens", tokens)
+				rec := httptest.NewRecorder()
+				testCompletions().ServeHTTP(rec, req)
+				return rec
+			}
+
+			want, _ := strconv.Atoi(tokens)
+			streamed := streamContent(t, send(true).Body.String())
+			if n := strings.Count(streamed, " token_"); n != want {
+				t.Errorf("stream sent %d tokens, want %d: %q", n, want, streamed)
+			}
+
+			m := decodeMap(t, send(false).Body.String())
+			msg := firstChoice(t, m)["message"].(map[string]any)
+			if msg["content"] != streamed {
+				t.Errorf("non-stream content = %q, stream content = %q", msg["content"], streamed)
+			}
+			usage := m["usage"].(map[string]any)
+			if usage["completion_tokens"] != float64(want) {
+				t.Errorf("completion_tokens = %v, want %d", usage["completion_tokens"], want)
+			}
+			if usage["total_tokens"] != usage["prompt_tokens"].(float64)+float64(want) {
+				t.Errorf("total_tokens = %v, want prompt + completion", usage["total_tokens"])
+			}
+		})
+	}
+}
+
+func TestCompletionsFirstTokenSkipsTPOT(t *testing.T) {
+	// with one token TPOT never applies: an extra tick before the first token would hang here
+	h := &CompletionsHandler{DefaultConfig: MockConfig{TTFT: 0, TPOT: time.Hour, Tokens: 1}}
+
+	done := make(chan *httptest.ResponseRecorder)
+	go func() { done <- post(t, h, `{"stream":true,`+hiMessages+`}`) }()
+
+	select {
+	case rec := <-done:
+		if got := streamContent(t, rec.Body.String()); got != " token_1" {
+			t.Errorf("content = %q, want %q", got, " token_1")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first token waited for TPOT")
+	}
+}
+
+func TestCompletionsNonStreamClientGone(t *testing.T) {
+	h := &CompletionsHandler{DefaultConfig: MockConfig{TTFT: time.Hour, TPOT: time.Millisecond, Tokens: 1}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{`+hiMessages+`}`))
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not return after client disconnected")
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("nothing should be written for a gone client, got %q", rec.Body.String())
 	}
 }
 

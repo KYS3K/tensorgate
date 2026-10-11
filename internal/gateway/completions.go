@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/KYS3K/tensorgate/internal/sse"
@@ -15,18 +16,18 @@ const (
 	defaultModel = "tensorgate-mock-v0"
 	// so a client can't make us buffer arbitrary amounts of JSON
 	maxBodyBytes = 1 << 20
+	// we don't tokenize the prompt so usage reports a fixed count
+	mockPromptTokens = 10
 )
 
 // CompletionsHandler serves an OpenAI-compatible /v1/chat/completions endpoint with mock output
 type CompletionsHandler struct {
-	Tokens int
-	Interval time.Duration
+	DefaultConfig MockConfig
 }
 
 func NewCompletionsHandler() *CompletionsHandler {
 	return &CompletionsHandler{
-		Tokens:   5,
-		Interval: 100 * time.Millisecond,
+		DefaultConfig: DefaultMockConfig(),
 	}
 }
 
@@ -58,12 +59,40 @@ func (h *CompletionsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.Model = defaultModel
 	}
 
-	c := completion{id: "chatcmpl-" + rand.Text(), created: time.Now().Unix(), model: req.Model}
-	if req.Stream {
-		h.handleStream(w, r, c)
+	cfg, err := h.resolveConfig(r)
+	if err != nil {
+		param := ""
+		if herr, ok := errors.AsType[*HeaderError](err); ok {
+			param = herr.Header
+		}
+		writeError(w, http.StatusBadRequest, err.Error(), param)
 		return
 	}
-	h.handleNonStream(w, c)
+	c := completion{id: "chatcmpl-" + rand.Text(), created: time.Now().Unix(), model: req.Model}
+	if req.Stream {
+		h.handleStream(w, r, cfg, c)
+		return
+	}
+	h.handleNonStream(w, r, cfg, c)
+}
+
+func mockToken(i int) string {
+	return fmt.Sprintf(" token_%d", i)
+}
+
+func sleep(r *http.Request, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+
+	select {
+	case <-r.Context().Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // completion holds what every response or chunk of one request shares
@@ -83,7 +112,16 @@ func (c completion) chunk(delta ChunkDelta, finishReason *string) ChatCompletion
 	}
 }
 
-func (h *CompletionsHandler) handleNonStream(w http.ResponseWriter, c completion) {
+func (h *CompletionsHandler) handleNonStream(w http.ResponseWriter, r *http.Request, cfg MockConfig, c completion) {
+	if !sleep(r, cfg.TTFT+time.Duration(cfg.Tokens-1)*cfg.TPOT) {
+		return
+	}
+
+	var content strings.Builder
+	for i := 1; i <= cfg.Tokens; i++ {
+		content.WriteString(mockToken(i))
+	}
+
 	resp := ChatCompletionResponse{
 		ID:      c.id,
 		Object:  "chat.completion",
@@ -91,13 +129,13 @@ func (h *CompletionsHandler) handleNonStream(w http.ResponseWriter, c completion
 		Model:   c.model,
 		Choices: []Choice{{
 			Index:        0,
-			Message:      ChatMessage{Role: "assistant", Content: "Hello from Tensorgate. This is mock response"},
+			Message:      ChatMessage{Role: "assistant", Content: content.String()},
 			FinishReason: "stop",
 		}},
 		Usage: Usage{
-			PromptTokens:     10,
-			CompletionTokens: 10,
-			TotalTokens:      20,
+			PromptTokens:     mockPromptTokens,
+			CompletionTokens: cfg.Tokens,
+			TotalTokens:      mockPromptTokens + cfg.Tokens,
 		},
 	}
 
@@ -105,25 +143,33 @@ func (h *CompletionsHandler) handleNonStream(w http.ResponseWriter, c completion
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func (h *CompletionsHandler) handleStream(w http.ResponseWriter, r *http.Request, c completion) {
+func (h *CompletionsHandler) handleStream(w http.ResponseWriter, r *http.Request, cfg MockConfig, c completion) {
 	sw := sse.NewWriter(w)
-	ticker := time.NewTicker(h.Interval)
-	defer ticker.Stop()
+
+	if !sleep(r, cfg.TTFT) {
+		return
+	}
 
 	// OpenAI sends the role alone in the first chunk, before any content
 	if err := sendChunk(sw, c.chunk(ChunkDelta{Role: "assistant"}, nil)); err != nil {
 		return
 	}
 
-	for i := 1; i <= h.Tokens; i++ {
-		select {
-		case <-r.Context().Done():
-			// client ended session or server is down
-			return
-		case <-ticker.C:
+	ticker := time.NewTicker(cfg.TPOT)
+	defer ticker.Stop()
+
+	for i := 1; i <= cfg.Tokens; i++ {
+		// the first token goes out right after TTFT; TPOT is the gap between tokens
+		if i > 1 {
+			select {
+			case <-r.Context().Done():
+				// client ended session or server is down
+				return
+			case <-ticker.C:
+			}
 		}
 
-		if err := sendChunk(sw, c.chunk(ChunkDelta{Content: fmt.Sprintf(" token_%d", i)}, nil)); err != nil {
+		if err := sendChunk(sw, c.chunk(ChunkDelta{Content: mockToken(i)}, nil)); err != nil {
 			return
 		}
 	}
