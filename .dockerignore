@@ -1,0 +1,8 @@
+.git
+bin
+tensorgate
+*.out
+*.prof
+coverage.*
+.env
+.env.*
