@@ -1,0 +1,15 @@
+TcpOutSegs                      24307187           0.0
+TcpRetransSegs                  812879             0.0
+TcpExtTCPSACKReorder            815                0.0
+TcpExtTCPRenoReorder            0                  0.0
+TcpExtTCPTSReorder              0                  0.0
+TcpExtTCPDSACKUndo              679                0.0
+TcpExtTCPLossUndo               441                0.0
+TcpExtTCPLostRetransmit         67002              0.0
+TcpExtTCPFastRetrans            734112             0.0
+TcpExtTCPTimeouts               66042              0.0
+TcpExtTCPDSACKOldSent           245                0.0
+TcpExtTCPDSACKRecv              11065              0.0
+TcpExtTCPDSACKIgnoredNoUndo     11                 0.0
+TcpExtTCPSpuriousRTOs           144                0.0
+TcpExtTCPDSACKRecvSegs          12072              0.0

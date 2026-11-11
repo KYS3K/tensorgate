@@ -1,0 +1,7 @@
+TcpOutSegs                      24321017           0.0
+TcpRetransSegs                  591050             0.0
+TcpExtTCPLostRetransmit         36947              0.0
+TcpExtTCPFastRetrans            566961             0.0
+TcpExtTCPTimeouts               16939              0.0
+TcpExtTCPLossProbes             8576               0.0
+TcpExtTCPSpuriousRTOs           217                0.0

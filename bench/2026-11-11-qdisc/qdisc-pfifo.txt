@@ -1,0 +1,3 @@
+qdisc pfifo 8003: root refcnt 2 limit 10000p
+ Sent 7903572658 bytes 24911827 pkt (dropped 0, overlimits 0 requeues 382679) 
+ backlog 0b 0p requeues 382679
