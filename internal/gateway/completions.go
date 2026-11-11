@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -101,7 +102,13 @@ func failed(r *http.Request) metrics.Outcome {
 }
 
 func mockToken(i int) string {
-	return fmt.Sprintf(" token_%d", i)
+	return string(appendMockToken(nil, i))
+}
+
+// appendMockToken is mockToken for the streaming hot path, without allocating
+func appendMockToken(b []byte, i int) []byte {
+	b = append(b, " token_"...)
+	return strconv.AppendInt(b, int64(i), 10)
 }
 
 func sleep(r *http.Request, d time.Duration) bool {
@@ -124,16 +131,6 @@ type completion struct {
 	id    string
 	start time.Time // when the request arrived
 	model string
-}
-
-func (c completion) chunk(delta ChunkDelta, finishReason *string) ChatCompletionChunk {
-	return ChatCompletionChunk{
-		ID:      c.id,
-		Object:  "chat.completion.chunk",
-		Created: c.start.Unix(),
-		Model:   c.model,
-		Choices: []ChunkChoice{{Index: 0, Delta: delta, FinishReason: finishReason}},
-	}
 }
 
 func (h *CompletionsHandler) handleNonStream(w http.ResponseWriter, r *http.Request, cfg MockConfig, c completion) metrics.Outcome {
@@ -175,13 +172,16 @@ func (h *CompletionsHandler) handleStream(w http.ResponseWriter, r *http.Request
 	defer h.metrics.StreamEnded()
 
 	sw := sse.NewWriter(w)
+	// chunks are encoded into per-stream buffers, so sending a token doesn't allocate
+	enc := newChunkEncoder(c)
+	var tok []byte
 
 	if !sleep(r, cfg.TTFT) {
 		return metrics.OutcomeCanceled
 	}
 
 	// OpenAI sends the role alone in the first chunk, before any content
-	if err := sendChunk(sw, c.chunk(ChunkDelta{Role: "assistant"}, nil)); err != nil {
+	if err := sw.SendData(enc.role("assistant")); err != nil {
 		return failed(r)
 	}
 
@@ -200,7 +200,8 @@ func (h *CompletionsHandler) handleStream(w http.ResponseWriter, r *http.Request
 			}
 		}
 
-		if err := sendChunk(sw, c.chunk(ChunkDelta{Content: mockToken(i)}, nil)); err != nil {
+		tok = appendMockToken(tok[:0], i)
+		if err := sw.SendData(enc.content(tok)); err != nil {
 			return failed(r)
 		}
 
@@ -214,8 +215,7 @@ func (h *CompletionsHandler) handleStream(w http.ResponseWriter, r *http.Request
 		lastToken = now
 	}
 
-	stop := "stop"
-	if err := sendChunk(sw, c.chunk(ChunkDelta{}, &stop)); err != nil {
+	if err := sw.SendData(enc.finish("stop")); err != nil {
 		return failed(r)
 	}
 
@@ -224,15 +224,6 @@ func (h *CompletionsHandler) handleStream(w http.ResponseWriter, r *http.Request
 		return failed(r)
 	}
 	return metrics.OutcomeCompleted
-}
-
-func sendChunk(sw *sse.Writer, chunk ChatCompletionChunk) error {
-	payload, err := json.Marshal(chunk)
-	if err != nil {
-		return err
-	}
-
-	return sw.Send(sse.Event{Data: string(payload)})
 }
 
 func writeError(w http.ResponseWriter, status int, msg, param string) {

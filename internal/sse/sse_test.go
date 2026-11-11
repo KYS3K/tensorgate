@@ -81,6 +81,41 @@ func TestWriterSend(t *testing.T) {
 	}
 }
 
+// SendData must put the same bytes on the wire as Send with a data-only event
+func TestWriterSendData(t *testing.T) {
+	for _, data := range []string{"hi", "", "a\nb", "a\r\nb\rc", "line one\nline two\n", "\r", "\r\n\r\n"} {
+		want := httptest.NewRecorder()
+		if err := NewWriter(want).Send(Event{Data: data}); err != nil {
+			t.Fatal(err)
+		}
+		got := httptest.NewRecorder()
+		if err := NewWriter(got).SendData([]byte(data)); err != nil {
+			t.Fatal(err)
+		}
+		if got.Body.String() != want.Body.String() {
+			t.Errorf("SendData(%q) wire = %q, Send wire = %q", data, got.Body.String(), want.Body.String())
+		}
+		if !got.Flushed {
+			t.Errorf("SendData(%q) was not flushed", data)
+		}
+	}
+}
+
+// the buffer is reused between events: a short event after a long one must not carry leftovers
+func TestWriterReusesBuffer(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw := NewWriter(rec)
+	for _, e := range []Event{{ID: "1", Type: "long", Data: strings.Repeat("x", 200)}, {Data: "y"}} {
+		if err := sw.Send(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := "id: 1\nevent: long\ndata: " + strings.Repeat("x", 200) + "\n\ndata: y\n\n"
+	if got := rec.Body.String(); got != want {
+		t.Errorf("wire = %q, want %q", got, want)
+	}
+}
+
 func TestWriterSendRejectsLineBreaks(t *testing.T) {
 	for _, e := range []Event{
 		{ID: "1\ndata: injected", Data: "x"},
