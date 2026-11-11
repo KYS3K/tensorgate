@@ -21,6 +21,8 @@ import (
 
 func main() {
 	pprofAddr := flag.String("pprof", "127.0.0.1:6060", `pprof listen address, "" disables it`)
+	flushInterval := flag.Duration("flush-interval", 100*time.Millisecond,
+		"batch each stream's tokens into at most one write per interval, 0 writes every token at once")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -30,7 +32,9 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /events", gateway.NewStreamer())
-	mux.Handle("POST /v1/chat/completions", gateway.NewCompletionsHandler(m))
+	completions := gateway.NewCompletionsHandler(m)
+	completions.FlushInterval = *flushInterval
+	mux.Handle("POST /v1/chat/completions", completions)
 
 	// request contexts derive from baseCtx, so cancelling it on shutdown ends open SSE streams;
 	// otherwise Shutdown would wait for every stream to finish on its own

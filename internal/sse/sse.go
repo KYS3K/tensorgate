@@ -68,22 +68,37 @@ func (s *Writer) Send(e Event) error {
 		b = append(b, '\n')
 	}
 	b = appendData(b, e.Data)
-	return s.write(b)
+	if err := s.write(b); err != nil {
+		return err
+	}
+	return s.Flush()
 }
 
 // SendData sends a data-only event, the same as Send(Event{Data: string(data)}) without
 // converting data to a string. Writer doesn't keep data, so the caller may reuse it.
 func (s *Writer) SendData(data []byte) error {
+	if err := s.WriteData(data); err != nil {
+		return err
+	}
+	return s.Flush()
+}
+
+// WriteData is SendData without the flush: the event stays in the response buffer until
+// Flush, or until the buffer fills up. See Coalescer.
+func (s *Writer) WriteData(data []byte) error {
 	return s.write(appendData(s.buf[:0], data))
+}
+
+// Flush sends everything written so far to the client
+func (s *Writer) Flush() error {
+	//don't w8 for 4KB buffer being filled
+	return s.rc.Flush()
 }
 
 func (s *Writer) write(b []byte) error {
 	s.buf = b
-	if _, err := s.w.Write(b); err != nil {
-		return err
-	}
-	//don't w8 for 4KB buffer being filled
-	return s.rc.Flush()
+	_, err := s.w.Write(b)
+	return err
 }
 
 // appendData appends data as data: fields and the blank line that ends the event.

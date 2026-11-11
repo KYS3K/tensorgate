@@ -15,7 +15,7 @@ type Outcome string
 const (
 	OutcomeCompleted      Outcome = "completed"
 	OutcomeInvalidRequest Outcome = "invalid_request"
-	OutcomeCanceled       Outcome = "canceled" 
+	OutcomeCanceled       Outcome = "canceled"
 	OutcomeWriteError     Outcome = "write_error"
 )
 
@@ -24,6 +24,7 @@ type Metrics struct {
 	requestsTotal *prometheus.CounterVec
 	ttftSeconds   prometheus.Histogram
 	tpotSeconds   prometheus.Histogram
+	flushEvents   prometheus.Histogram
 }
 
 func New(reg prometheus.Registerer) *Metrics {
@@ -46,8 +47,13 @@ func New(reg prometheus.Registerer) *Metrics {
 		}),
 		tpotSeconds: factory.NewHistogram(prometheus.HistogramOpts{
 			Name:    "tensorgate_tpot_seconds",
-			Help:    "Time between consecutive content tokens of a stream.",
+			Help:    "Time between consecutive content tokens of a stream, as the gateway gets them; with flush coalescing on, clients receive them in batches.",
 			Buckets: []float64{0.001, 0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.25, 0.5, 1, 2.5, 5},
+		}),
+		flushEvents: factory.NewHistogram(prometheus.HistogramOpts{
+			Name:    "tensorgate_stream_flush_events",
+			Help:    "SSE events sent per flush of a stream, i.e. per write to the client connection.",
+			Buckets: []float64{1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 50},
 		}),
 	}
 }
@@ -85,4 +91,11 @@ func (m *Metrics) ObserveTPOT(d time.Duration) {
 		return
 	}
 	m.tpotSeconds.Observe(d.Seconds())
+}
+
+func (m *Metrics) ObserveFlush(events int) {
+	if m == nil {
+		return
+	}
+	m.flushEvents.Observe(float64(events))
 }
