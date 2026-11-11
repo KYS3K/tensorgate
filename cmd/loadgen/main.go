@@ -1,5 +1,9 @@
 // Command loadgen holds a fixed pool of concurrent SSE streams against /v1/chat/completions
-// and reports client-side TTFT and inter-token gaps once per second.
+// and reports client-side TTFT, token lateness and inter-token gaps once per second.
+//
+// Lateness is how much later than the ideal schedule start+TTFT+(i-1)*TPOT the i-th token
+// arrived. Unlike gaps it stays meaningful when the server batches tokens into one write:
+// a batch gives gaps near 0 and near the batch interval, but its lateness is the real delay.
 //
 // Connections are opened at a fixed rate (-rate) instead of all at once, so the ramp-up
 // doesn't overflow the server's SYN/accept backlog. When a stream finishes, its worker
@@ -109,9 +113,10 @@ type gen struct {
 
 	// interval histograms are swapped out by the reporter every second
 	ttft atomic.Pointer[hist]
+	late atomic.Pointer[hist]
 	gap  atomic.Pointer[hist]
 	// whole-run histograms, written only by the reporter
-	ttftTotal, gapTotal *hist
+	ttftTotal, lateTotal, gapTotal *hist
 
 	errMu sync.Mutex
 	errs  map[string]int64
@@ -135,9 +140,11 @@ func newGen() *gen {
 		client:    &http.Client{Transport: tr}, // no Client.Timeout: streams are long-lived
 		errs:      make(map[string]int64),
 		ttftTotal: new(hist),
+		lateTotal: new(hist),
 		gapTotal:  new(hist),
 	}
 	g.ttft.Store(new(hist))
+	g.late.Store(new(hist))
 	g.gap.Store(new(hist))
 	return g
 }
@@ -196,6 +203,7 @@ func (g *gen) stream(ctx context.Context) error {
 
 	br := bufio.NewReaderSize(resp.Body, 4096)
 	var last time.Time
+	n := 0 // content tokens received so far
 	for {
 		// ReadSlice doesn't allocate; chunks are far below the buffer size
 		line, err := br.ReadSlice('\n')
@@ -232,6 +240,9 @@ func (g *gen) stream(ctx context.Context) error {
 		} else {
 			g.gap.Load().record(now.Sub(last))
 		}
+		due := start.Add(*ttft + time.Duration(n)*(*tpot))
+		g.late.Load().record(now.Sub(due)) // early can't happen beyond clock noise; record clamps it to 0
+		n++
 		last = now
 		g.tokensRx.Add(1)
 	}
@@ -254,7 +265,7 @@ func (g *gen) report(ctx context.Context, start time.Time) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 
-	totalTTFT, totalGap := g.ttftTotal, g.gapTotal
+	totalTTFT, totalLate, totalGap := g.ttftTotal, g.lateTotal, g.gapTotal
 
 	var prevTokens, prevErrs int64
 	prev := time.Now()
@@ -263,14 +274,17 @@ func (g *gen) report(ctx context.Context, start time.Time) {
 		case <-ctx.Done():
 			// fold in what the last partial interval recorded
 			totalTTFT.merge(g.ttft.Load())
+			totalLate.merge(g.late.Load())
 			totalGap.merge(g.gap.Load())
 			return
 		case <-t.C:
 		}
 		now := time.Now()
 		ttft := g.ttft.Swap(new(hist))
+		late := g.late.Swap(new(hist))
 		gap := g.gap.Swap(new(hist))
 		totalTTFT.merge(ttft)
+		totalLate.merge(late)
 		totalGap.merge(gap)
 
 		tok := g.tokensRx.Load()
@@ -278,16 +292,17 @@ func (g *gen) report(ctx context.Context, start time.Time) {
 		secs := now.Sub(prev).Seconds()
 
 		if line%20 == 0 {
-			fmt.Printf("%7s %8s %9s %9s %7s %9s | %8s %8s | %8s %8s %8s\n",
+			fmt.Printf("%7s %8s %9s %9s %7s %9s | %8s %8s | %8s %8s %8s | %8s %8s\n",
 				"elapsed", "inflight", "started", "done", "err/s", "tok/s",
-				"ttft p50", "ttft p99", "gap p50", "gap p99", "gap max")
+				"ttft p50", "ttft p99", "late p50", "late p99", "late max", "gap p99", "gap max")
 		}
-		fmt.Printf("%7s %8d %9d %9d %7.0f %9.0f | %8s %8s | %8s %8s %8s\n",
+		fmt.Printf("%7s %8d %9d %9d %7.0f %9.0f | %8s %8s | %8s %8s %8s | %8s %8s\n",
 			now.Sub(start).Round(time.Second),
 			g.inflight.Load(), g.started.Load(), g.completed.Load(),
 			float64(errs-prevErrs)/secs, float64(tok-prevTokens)/secs,
 			fmtDur(ttft.quantile(0.5)), fmtDur(ttft.quantile(0.99)),
-			fmtDur(gap.quantile(0.5)), fmtDur(gap.quantile(0.99)), fmtDur(gap.max()))
+			fmtDur(late.quantile(0.5)), fmtDur(late.quantile(0.99)), fmtDur(late.max()),
+			fmtDur(gap.quantile(0.99)), fmtDur(gap.max()))
 
 		prevTokens, prevErrs, prev = tok, errs, now
 	}
@@ -301,7 +316,7 @@ func (g *gen) summary(elapsed time.Duration) {
 	for _, h := range []struct {
 		name string
 		h    *hist
-	}{{"ttft", g.ttftTotal}, {"gap ", g.gapTotal}} {
+	}{{"ttft", g.ttftTotal}, {"late", g.lateTotal}, {"gap ", g.gapTotal}} {
 		fmt.Printf("%s  p50 %s  p90 %s  p99 %s  p99.9 %s  max %s  (n=%d)\n", h.name,
 			fmtDur(h.h.quantile(0.5)), fmtDur(h.h.quantile(0.9)), fmtDur(h.h.quantile(0.99)),
 			fmtDur(h.h.quantile(0.999)), fmtDur(h.h.max()), h.h.count())
