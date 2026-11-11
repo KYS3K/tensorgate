@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"log"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -18,6 +20,9 @@ import (
 )
 
 func main() {
+	pprofAddr := flag.String("pprof", "127.0.0.1:6060", `pprof listen address, "" disables it`)
+	flag.Parse()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -50,7 +55,22 @@ func main() {
 		ReadHeaderTimeout: 2 * time.Second,
 	}
 
+	// pprof is bound to loopback only: profiles leak internals and /profile burns CPU,
+	// so reach it from outside via an SSH tunnel (ssh -L 6060:localhost:6060 host)
+	pprofMux := http.NewServeMux()
+	pprofMux.HandleFunc("/debug/pprof/", pprof.Index)
+	pprofMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	pprofMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	pprofMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	pprofMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	servers := []*http.Server{api, metricsSrv}
+	if *pprofAddr != "" {
+		servers = append(servers, &http.Server{
+			Addr:              *pprofAddr,
+			Handler:           pprofMux,
+			ReadHeaderTimeout: 2 * time.Second,
+		})
+	}
 	errc := make(chan error, len(servers))
 	for _, srv := range servers {
 		go func() {
