@@ -16,6 +16,7 @@ func TestNilMetricsIsNoop(t *testing.T) {
 	m.RequestDone("model", true, OutcomeCompleted)
 	m.ObserveTTFT(time.Second)
 	m.ObserveTPOT(time.Second)
+	m.ObserveFlush(3)
 }
 
 func TestMetrics(t *testing.T) {

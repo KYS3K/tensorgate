@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/KYS3K/tensorgate/internal/metrics"
+	"github.com/KYS3K/tensorgate/internal/sse"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
@@ -146,5 +148,54 @@ func TestCompletionsMetricsActiveStreams(t *testing.T) {
 	<-done
 	if got := active(); got != 0 {
 		t.Errorf("active streams = %v after the stream ended, want 0", got)
+	}
+}
+
+// with a flush interval the stream carries the same events, just in fewer writes
+func TestCompletionsStreamCoalesced(t *testing.T) {
+	t.Parallel()
+	const (
+		tpot     = 5 * time.Millisecond
+		tokens   = 20
+		interval = 25 * time.Millisecond
+	)
+	h, reg := meteredCompletions(MockConfig{TPOT: tpot, Tokens: tokens})
+	h.FlushInterval = interval
+
+	start := time.Now()
+	rec := post(t, h, `{"stream":true,`+hiMessages+`}`)
+	elapsed := time.Since(start)
+
+	var content []string
+	var last string
+	if err := sse.ReadEvents(strings.NewReader(rec.Body.String()), func(_, d string) {
+		last = d
+		if strings.Contains(d, `"content"`) {
+			delta := firstChoice(t, decodeMap(t, d))["delta"].(map[string]any)
+			content = append(content, delta["content"].(string))
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(content) != tokens || content[0] != " token_1" || content[tokens-1] != fmt.Sprintf(" token_%d", tokens) {
+		t.Errorf("content = %q, want token_1..token_%d", content, tokens)
+	}
+	if last != "[DONE]" {
+		t.Errorf("last event = %q, want [DONE]", last)
+	}
+
+	// role + tokens + finish + [DONE], in far fewer flushes than tokens
+	flushes := gather(t, reg, "tensorgate_stream_flush_events").GetHistogram()
+	if got := flushes.GetSampleSum(); got != tokens+3 {
+		t.Errorf("events flushed = %v, want %d", got, tokens+3)
+	}
+	// ~100ms of tokens at one flush per 25ms, plus the immediate first and last flush
+	if n := flushes.GetSampleCount(); n < 3 || n > 10 {
+		t.Errorf("flushes = %d, want about %d", n, int((tokens-1)*tpot/interval)+2)
+	}
+
+	// the end of the stream isn't held back for another interval
+	if limit := (tokens-1)*tpot + interval; elapsed > limit+50*time.Millisecond {
+		t.Errorf("stream took %v, want about %v", elapsed, (tokens-1)*tpot)
 	}
 }

@@ -1,0 +1,5 @@
+qdisc fq_codel 8001: root refcnt 2 limit 10240p flows 1024 quantum 1464 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 
+ Sent 7894954435 bytes 25120422 pkt (dropped 854015, overlimits 0 requeues 399478) 
+ backlog 0b 0p requeues 399478
+  maxpacket 4392 drop_overlimit 0 new_flow_count 3737594 ecn_mark 0
+  new_flows_len 0 old_flows_len 0

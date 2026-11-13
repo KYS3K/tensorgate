@@ -1,0 +1,2 @@
+tensorgate_stream_flush_events_sum 2.2630299e+07
+tensorgate_stream_flush_events_count 6.745924e+06

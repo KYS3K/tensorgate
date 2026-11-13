@@ -1,0 +1,6 @@
+TcpInSegs                       21917808           0.0
+TcpOutSegs                      22833354           0.0
+TcpRetransSegs                  563610             0.0
+TcpExtTCPTimeouts               43469              0.0
+TcpExtTCPDSACKRecv              36704              0.0
+TcpExtTCPDSACKRecvSegs          50877              0.0
