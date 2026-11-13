@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"log"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -18,6 +20,11 @@ import (
 )
 
 func main() {
+	pprofAddr := flag.String("pprof", "127.0.0.1:6060", `pprof listen address, "" disables it`)
+	flushInterval := flag.Duration("flush-interval", 100*time.Millisecond,
+		"batch each stream's tokens into at most one write per interval, 0 writes every token at once")
+	flag.Parse()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -25,7 +32,9 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /events", gateway.NewStreamer())
-	mux.Handle("POST /v1/chat/completions", gateway.NewCompletionsHandler(m))
+	completions := gateway.NewCompletionsHandler(m)
+	completions.FlushInterval = *flushInterval
+	mux.Handle("POST /v1/chat/completions", completions)
 
 	// request contexts derive from baseCtx, so cancelling it on shutdown ends open SSE streams;
 	// otherwise Shutdown would wait for every stream to finish on its own
@@ -50,7 +59,22 @@ func main() {
 		ReadHeaderTimeout: 2 * time.Second,
 	}
 
+	// pprof is bound to loopback only: profiles leak internals and /profile burns CPU,
+	// so reach it from outside via an SSH tunnel (ssh -L 6060:localhost:6060 host)
+	pprofMux := http.NewServeMux()
+	pprofMux.HandleFunc("/debug/pprof/", pprof.Index)
+	pprofMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	pprofMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	pprofMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	pprofMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	servers := []*http.Server{api, metricsSrv}
+	if *pprofAddr != "" {
+		servers = append(servers, &http.Server{
+			Addr:              *pprofAddr,
+			Handler:           pprofMux,
+			ReadHeaderTimeout: 2 * time.Second,
+		})
+	}
 	errc := make(chan error, len(servers))
 	for _, srv := range servers {
 		go func() {

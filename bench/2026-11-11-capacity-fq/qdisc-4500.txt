@@ -1,0 +1,5 @@
+qdisc fq 8005: root refcnt 2 limit 10000p flow_limit 100p buckets 1024 orphan_mask 1023 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 weights 589824 196608 65536 quantum 2928b initial_quantum 14640b low_rate_threshold 550Kbit refill_delay 40ms timer_slack 10us horizon 10s horizon_drop offload_horizon 0us 
+ Sent 24493082877 bytes 84980524 pkt (dropped 0, overlimits 0 requeues 630084) 
+ backlog 0b 0p requeues 630084
+  flows 4964 (inactive 4964 throttled 0) band0_pkts 0 band1_pkts 0 band2_pkts 0
+  gc 30765 highprio 0 fastpath 53996171 throttled 55309 latency 18.9us

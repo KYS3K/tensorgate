@@ -7,7 +7,7 @@ PKG    := ./cmd/tensorgate
 
 .DEFAULT_GOAL := help
 
-.PHONY: help run build test cover fmt fmt-check vet lint vuln tidy check clean
+.PHONY: help run build bench-build test cover fmt fmt-check vet lint vuln tidy check clean
 
 help: ## list targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -19,6 +19,11 @@ run: build ## build and run the gateway (API on :8080, metrics on :9090)
 
 build: ## build the binary into bin/
 	go build -trimpath -o $(BINARY) $(PKG)
+
+# static linux/amd64 binaries for the bench VMs; symbols are kept (no -s -w) so perf can resolve them
+bench-build: ## build linux/amd64 tensorgate + loadgen into bin/ for the bench VMs
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/tensorgate-linux $(PKG)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/loadgen-linux ./cmd/loadgen
 
 test: ## run all tests with the race detector
 	go test -race ./...
