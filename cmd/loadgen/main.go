@@ -44,6 +44,14 @@ var (
 	ttft      = flag.Duration("ttft", 200*time.Millisecond, "X-Mock-TTFT: delay before the first token")
 	backoff   = flag.Duration("backoff", time.Second, "wait after a failed stream before retrying (jittered)")
 	keepAlive = flag.Bool("keepalive", true, "reuse the connection for the next stream; false dials a new one every time")
+
+	apiKey = flag.String("api-key", "",
+		`API key sent in X-Api-Key, "" sends none; with -keys > 1 it is the prefix of key-0, key-1, ... ("loadgen" if empty)`)
+	keys = flag.Int("keys", 1,
+		"spread the workers over this many API keys, round-robin: the server limits every key on its own, so few keys provoke 429 and many keys leave only the stream limit (503)")
+	honorRetryAfter = flag.Bool("honor-retry-after", true,
+		"after a 429/503 wait the server's Retry-After instead of -backoff, like a well-behaved client")
+	csvPath = flag.String("csv", "", "also write the per-second report to this CSV file, numbers only, for plotting")
 )
 
 var body = []byte(`{"model":"tensorgate-mock-v0","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
@@ -58,6 +66,20 @@ func main() {
 	flag.Parse()
 	if *streams < 1 || *rate <= 0 {
 		log.Fatal("-streams and -rate must be positive")
+	}
+	if *keys < 1 {
+		log.Fatal("-keys must be at least 1")
+	}
+	apiKeys := makeAPIKeys()
+
+	var csvOut io.Writer // stays a nil interface when -csv is off
+	if *csvPath != "" {
+		f, err := os.Create(*csvPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer f.Close()
+		csvOut = f
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -74,20 +96,21 @@ func main() {
 	var wg sync.WaitGroup
 	reporterDone := make(chan struct{})
 	go func() {
-		g.report(ctx, start)
+		g.report(ctx, start, csvOut)
 		close(reporterDone)
 	}()
 
-	// ramp-up: one new worker per tick
+	// ramp-up: one new worker per tick, each tied to one API key for its whole life
 	tick := time.NewTicker(time.Duration(float64(time.Second) / *rate))
 ramp:
-	for range *streams {
+	for i := range *streams {
 		select {
 		case <-ctx.Done():
 			break ramp
 		case <-tick.C:
 		}
-		wg.Go(func() { g.worker(ctx) })
+		key := apiKeys[i%len(apiKeys)]
+		wg.Go(func() { g.worker(ctx, key) })
 	}
 	tick.Stop()
 	if ctx.Err() == nil {
@@ -100,6 +123,25 @@ ramp:
 	g.summary(time.Since(start))
 }
 
+// makeAPIKeys returns the keys the workers are spread over; a single empty key means "send no header"
+func makeAPIKeys() []string {
+	if *apiKey == "" && *keys == 1 {
+		return []string{""}
+	}
+	base := *apiKey
+	if base == "" {
+		base = "loadgen"
+	}
+	if *keys == 1 {
+		return []string{base}
+	}
+	out := make([]string, *keys)
+	for i := range out {
+		out[i] = base + "-" + strconv.Itoa(i)
+	}
+	return out
+}
+
 type gen struct {
 	client *http.Client
 
@@ -107,9 +149,14 @@ type gen struct {
 	started   atomic.Int64
 	completed atomic.Int64 // reached [DONE]
 	connErrs  atomic.Int64 // dial / request failed before a response
-	httpErrs  atomic.Int64 // non-200 response
+	httpErrs  atomic.Int64 // non-200 response other than the two admission rejections below
 	streamErr atomic.Int64 // stream broke before [DONE]
 	tokensRx  atomic.Int64 // content chunks received
+
+	// what admission control did: a rejection is the server working as designed, not an error
+	accepted atomic.Int64 // 200: a stream was opened
+	rej429   atomic.Int64 // rate limit of the API key
+	rej503   atomic.Int64 // no free stream slot within the queue wait
 
 	// interval histograms are swapped out by the reporter every second
 	ttft atomic.Pointer[hist]
@@ -149,16 +196,25 @@ func newGen() *gen {
 	return g
 }
 
-func (g *gen) worker(ctx context.Context) {
+func (g *gen) worker(ctx context.Context, key string) {
 	for ctx.Err() == nil {
-		if err := g.stream(ctx); err != nil && ctx.Err() == nil {
-			g.recordErr(err)
-			// jitter so workers that failed together don't retry together
-			d := *backoff/2 + rand.N(*backoff)
-			select {
-			case <-ctx.Done():
-			case <-time.After(d):
+		err := g.stream(ctx, key)
+		if err == nil || ctx.Err() != nil {
+			continue
+		}
+		// jitter so workers that failed together don't retry together
+		d := *backoff/2 + rand.N(*backoff)
+		if rej, ok := errors.AsType[*rejectedError](err); ok {
+			// not an error, so it stays out of "top errors"; the server's Retry-After already carries jitter
+			if *honorRetryAfter && rej.retryAfter > 0 {
+				d = rej.retryAfter
 			}
+		} else {
+			g.recordErr(err)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(d):
 		}
 	}
 }
@@ -167,12 +223,30 @@ type httpStatusError int
 
 func (e httpStatusError) Error() string { return "http status " + strconv.Itoa(int(e)) }
 
+// rejectedError is a 429 or 503 answer from admission control
+type rejectedError struct {
+	status     int
+	retryAfter time.Duration // 0 if the header is missing or not a number of seconds
+}
+
+func (e *rejectedError) Error() string { return "rejected with status " + strconv.Itoa(e.status) }
+
+func parseRetryAfter(h http.Header) time.Duration {
+	if s, err := strconv.Atoi(h.Get("Retry-After")); err == nil && s > 0 {
+		return time.Duration(s) * time.Second
+	}
+	return 0
+}
+
 var errPrematureEnd = errors.New("stream ended before [DONE]")
 
-func (g *gen) stream(ctx context.Context) error {
+func (g *gen) stream(ctx context.Context, key string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, *target, bytes.NewReader(body))
 	if err != nil {
 		return err
+	}
+	if key != "" {
+		req.Header.Set("X-Api-Key", key)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
@@ -196,10 +270,19 @@ func (g *gen) stream(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		g.httpErrs.Add(1)
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		switch resp.StatusCode {
+		case http.StatusTooManyRequests:
+			g.rej429.Add(1)
+			return &rejectedError{resp.StatusCode, parseRetryAfter(resp.Header)}
+		case http.StatusServiceUnavailable:
+			g.rej503.Add(1)
+			return &rejectedError{resp.StatusCode, parseRetryAfter(resp.Header)}
+		}
+		g.httpErrs.Add(1)
 		return httpStatusError(resp.StatusCode)
 	}
+	g.accepted.Add(1)
 
 	br := bufio.NewReaderSize(resp.Body, 4096)
 	var last time.Time
@@ -261,13 +344,27 @@ func (g *gen) recordErr(err error) {
 	g.errMu.Unlock()
 }
 
-func (g *gen) report(ctx context.Context, start time.Time) {
+// csvMs formats a histogram quantile for the CSV: milliseconds, empty when there was no sample
+func csvMs(d time.Duration) string {
+	if d < 0 {
+		return ""
+	}
+	return strconv.FormatFloat(float64(d)/float64(time.Millisecond), 'f', 1, 64)
+}
+
+// report prints one row per second; csvOut, if not nil, gets the same rows as plain numbers
+func (g *gen) report(ctx context.Context, start time.Time, csvOut io.Writer) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 
+	if csvOut != nil {
+		fmt.Fprintln(csvOut, "elapsed_s,inflight,tok_s,accepted_s,rej_429_s,rej_503_s,err_s,"+
+			"ttft_p50_ms,ttft_p99_ms,late_p50_ms,late_p99_ms,late_max_ms,gap_p99_ms")
+	}
+
 	totalTTFT, totalLate, totalGap := g.ttftTotal, g.lateTotal, g.gapTotal
 
-	var prevTokens, prevErrs int64
+	var prevTokens, prevErrs, prevAcc, prev429, prev503 int64
 	prev := time.Now()
 	for line := 0; ; line++ {
 		select {
@@ -289,28 +386,50 @@ func (g *gen) report(ctx context.Context, start time.Time) {
 
 		tok := g.tokensRx.Load()
 		errs := g.connErrs.Load() + g.httpErrs.Load() + g.streamErr.Load()
+		acc, r429, r503 := g.accepted.Load(), g.rej429.Load(), g.rej503.Load()
 		secs := now.Sub(prev).Seconds()
 
+		// the admission columns go last: bench/scripts/*.awk read the columns above by position
 		if line%20 == 0 {
-			fmt.Printf("%7s %8s %9s %9s %7s %9s | %8s %8s | %8s %8s %8s | %8s %8s\n",
+			fmt.Printf("%7s %8s %9s %9s %7s %9s | %8s %8s | %8s %8s %8s | %8s %8s | %7s %7s %7s\n",
 				"elapsed", "inflight", "started", "done", "err/s", "tok/s",
-				"ttft p50", "ttft p99", "late p50", "late p99", "late max", "gap p99", "gap max")
+				"ttft p50", "ttft p99", "late p50", "late p99", "late max", "gap p99", "gap max",
+				"acc/s", "429/s", "503/s")
 		}
-		fmt.Printf("%7s %8d %9d %9d %7.0f %9.0f | %8s %8s | %8s %8s %8s | %8s %8s\n",
+		fmt.Printf("%7s %8d %9d %9d %7.0f %9.0f | %8s %8s | %8s %8s %8s | %8s %8s | %7.0f %7.0f %7.0f\n",
 			now.Sub(start).Round(time.Second),
 			g.inflight.Load(), g.started.Load(), g.completed.Load(),
 			float64(errs-prevErrs)/secs, float64(tok-prevTokens)/secs,
 			fmtDur(ttft.quantile(0.5)), fmtDur(ttft.quantile(0.99)),
 			fmtDur(late.quantile(0.5)), fmtDur(late.quantile(0.99)), fmtDur(late.max()),
-			fmtDur(gap.quantile(0.99)), fmtDur(gap.max()))
+			fmtDur(gap.quantile(0.99)), fmtDur(gap.max()),
+			float64(acc-prevAcc)/secs, float64(r429-prev429)/secs, float64(r503-prev503)/secs)
+
+		if csvOut != nil {
+			fmt.Fprintf(csvOut, "%.0f,%d,%.0f,%.1f,%.1f,%.1f,%.1f,%s,%s,%s,%s,%s,%s\n",
+				now.Sub(start).Seconds(), g.inflight.Load(), float64(tok-prevTokens)/secs,
+				float64(acc-prevAcc)/secs, float64(r429-prev429)/secs, float64(r503-prev503)/secs,
+				float64(errs-prevErrs)/secs,
+				csvMs(ttft.quantile(0.5)), csvMs(ttft.quantile(0.99)),
+				csvMs(late.quantile(0.5)), csvMs(late.quantile(0.99)), csvMs(late.max()),
+				csvMs(gap.quantile(0.99)))
+		}
 
 		prevTokens, prevErrs, prev = tok, errs, now
+		prevAcc, prev429, prev503 = acc, r429, r503
 	}
 }
 
 func (g *gen) summary(elapsed time.Duration) {
 	fmt.Printf("\n=== summary after %v ===\n", elapsed.Round(time.Second))
 	fmt.Printf("streams started %d, completed %d\n", g.started.Load(), g.completed.Load())
+	if r429, r503 := g.rej429.Load(), g.rej503.Load(); r429+r503 > 0 {
+		// share of all requests the server answered, so it is the share of demand that was turned away
+		total := g.accepted.Load() + r429 + r503
+		fmt.Printf("admission: accepted %d (%.1f%%), rejected 429 %d (%.1f%%), rejected 503 %d (%.1f%%)\n",
+			g.accepted.Load(), 100*float64(g.accepted.Load())/float64(total),
+			r429, 100*float64(r429)/float64(total), r503, 100*float64(r503)/float64(total))
+	}
 	fmt.Printf("errors: connect %d, http %d, mid-stream %d\n", g.connErrs.Load(), g.httpErrs.Load(), g.streamErr.Load())
 	fmt.Printf("tokens received %d (%.0f/s avg)\n", g.tokensRx.Load(), float64(g.tokensRx.Load())/elapsed.Seconds())
 	for _, h := range []struct {
