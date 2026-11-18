@@ -1,3 +1,4 @@
+// Package admission gates requests and rate limits by auth key
 package admission
 
 import (
