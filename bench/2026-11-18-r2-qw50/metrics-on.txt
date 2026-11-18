@@ -1,0 +1,17 @@
+tensorgate_admission_queue_wait_seconds_bucket{le="0.0005"} 5000
+tensorgate_admission_queue_wait_seconds_bucket{le="0.001"} 5000
+tensorgate_admission_queue_wait_seconds_bucket{le="0.002"} 5000
+tensorgate_admission_queue_wait_seconds_bucket{le="0.005"} 5000
+tensorgate_admission_queue_wait_seconds_bucket{le="0.01"} 5000
+tensorgate_admission_queue_wait_seconds_bucket{le="0.02"} 5010
+tensorgate_admission_queue_wait_seconds_bucket{le="0.03"} 5031
+tensorgate_admission_queue_wait_seconds_bucket{le="0.05"} 92275
+tensorgate_admission_queue_wait_seconds_bucket{le="0.1"} 95701
+tensorgate_admission_queue_wait_seconds_bucket{le="+Inf"} 95705
+tensorgate_admission_queue_wait_seconds_sum 4525.12855797604
+tensorgate_admission_queue_wait_seconds_count 95705
+tensorgate_admission_requests_total{result="accepted"} 15028
+tensorgate_admission_requests_total{result="client_gone"} 0
+tensorgate_admission_requests_total{result="rejected_429"} 0
+tensorgate_admission_requests_total{result="rejected_503"} 80677
+tensorgate_admission_tracked_keys 1000

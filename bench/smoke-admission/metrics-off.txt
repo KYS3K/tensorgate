@@ -1,0 +1,16 @@
+tensorgate_admission_queue_wait_seconds_bucket{le="0.0005"} 0
+tensorgate_admission_queue_wait_seconds_bucket{le="0.001"} 0
+tensorgate_admission_queue_wait_seconds_bucket{le="0.002"} 0
+tensorgate_admission_queue_wait_seconds_bucket{le="0.005"} 0
+tensorgate_admission_queue_wait_seconds_bucket{le="0.01"} 0
+tensorgate_admission_queue_wait_seconds_bucket{le="0.02"} 0
+tensorgate_admission_queue_wait_seconds_bucket{le="0.03"} 0
+tensorgate_admission_queue_wait_seconds_bucket{le="0.05"} 0
+tensorgate_admission_queue_wait_seconds_bucket{le="0.1"} 0
+tensorgate_admission_queue_wait_seconds_bucket{le="+Inf"} 0
+tensorgate_admission_queue_wait_seconds_sum 0
+tensorgate_admission_queue_wait_seconds_count 0
+tensorgate_admission_requests_total{result="accepted"} 0
+tensorgate_admission_requests_total{result="client_gone"} 0
+tensorgate_admission_requests_total{result="rejected_429"} 0
+tensorgate_admission_requests_total{result="rejected_503"} 0

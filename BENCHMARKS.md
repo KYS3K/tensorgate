@@ -1,8 +1,8 @@
 # Benchmarks
 
-**v0 · 2026-11-11 · gateway overhead with a mock backend**
+**v1 · 2026-11-18 · gateway overhead with a mock backend, and admission control under overload**
 
-How many concurrent SSE completion streams one tensorgate process holds on 2 vCPU, what limits it, and what each fix bought. The backend is the built-in mock, so every number here is the cost of the gateway, the Linux network stack and the virtual network, not of a model.
+How many concurrent SSE completion streams one tensorgate process holds on 2 vCPU, what limits it, what each fix bought, and what happens to the streams already running when more clients arrive than the gateway can hold. The backend is the built-in mock, so every number here is the cost of the gateway, the Linux network stack and the virtual network, not of a model.
 
 ## Summary
 
@@ -17,11 +17,20 @@ TPOT 30 ms throughout. "Streams within SLO" uses the SLOs defined [below](#slos)
 
 What mattered most: the kernel and the virtual network pay **per packet, not per byte**, and every token was its own `write`, TCP segment and ACK. Halving allocations helped; sending a third of the packets helped more.
 
+Admission control, [result 6](#6-admission-control): 8000 clients against a gateway that holds 5000 streams.
+
+| | Lateness p99, seconds 41–175 | Seconds over the 150 ms SLO | Delivered | Requests answered 503 | Server CPU |
+|---|---|---|---|---|---|
+| No admission control | **825 ms** | 135 of 135 | 99.6% | 0% | 99.9% |
+| `-admission` with the defaults | **127–129 ms** (2 runs) | 3 of 135 | 99.4–99.5% | 84% | 83–89% |
+
+Without a limit every one of the 8000 streams gets slow. With the limit the 5000 admitted streams stay within the SLO and the other clients get a fast `503` with `Retry-After`. Two settings decide whether this works: the time a request may wait for a slot (20 ms; at 50 ms the SLO fails) and the random delay added to `Retry-After` (10 s; at 1 s the rejected clients came back ~2700 times a second and the admitted streams' lateness p99 was 221 ms, over the SLO).
+
 ## What is and isn't measured
 
 Measured: client-observed throughput and latency, and server CPU, for long-lived streaming completions through the gateway, with a backend that emits tokens on an exact schedule (TTFT 200 ms, TPOT 30 ms, 2000 tokens per stream).
 
-Not measured: a real model (no batching jitter, no variable token sizes), request admission and routing (not implemented yet), TLS, HTTP/2, non-streaming requests.
+Not measured: a real model (no batching jitter, no variable token sizes), routing across backends (not implemented yet), TLS, HTTP/2, non-streaming requests. Admission control is measured for one scenario only (constant overload, clients that honour `Retry-After`), see [result 6](#6-admission-control) and [Limitations](#limitations).
 
 ## Setup
 
@@ -67,6 +76,7 @@ Server, from [result 3](#3-egress-qdisc) on: `net.core.default_qdisc = fq` plus 
 | `005681d` | zero-alloc token path |
 | `07f5716` | token lateness in loadgen |
 | `9d2887a` | flush coalescing, `-flush-interval` (default 100 ms) |
+| `c9a7122`, `f69494f`, `06cccd9` | admission control (`internal/admission`, `-admission` and its flags), `loadgen` `-keys`, `-honor-retry-after`, `-csv`; result 6 only. The runs were made from the working tree just before these commits |
 
 The baseline binary was `4a26300` plus the pprof listener.
 
@@ -85,6 +95,8 @@ Metrics, all measured on the client:
 | CPU per token | server CPU busy (`mpstat`, both vCPU) / tok/s |
 | packets/s, retransmits, RTO | server `nstat` deltas over the run: `TcpOutSegs`, `TcpRetransSegs`, `TcpExtTCPTimeouts` |
 
+For the admission runs `loadgen` takes a few more flags: `-keys N` spreads the streams over N API keys (`-api-key` sets a single one), `-honor-retry-after` (default on) makes a rejected client wait exactly the `Retry-After` it was given (with `-honor-retry-after=false` it waits `-backoff` 1 s, jittered, as after any other failure), and `-csv` writes one row per second (accepted, 429 and 503 per second, lateness, TTFT) for the charts. The lateness clock starts when the request is sent, so the time an admitted request waited for a slot counts as lateness. TTFT includes it too.
+
 Gap stops meaning anything once tokens are batched: it becomes ≈0 inside a batch and ≈interval between batches. Lateness is the delay a reader actually sees, with or without batching, so it is the SLO metric for the coalescing runs.
 
 ### Method
@@ -101,6 +113,8 @@ A stream count is "within SLO" if all of these hold:
 - without coalescing: gap p99 < 60 ms (2 × TPOT);
 - with coalescing interval W: lateness p99 ≤ W + 50 ms;
 - no errors.
+
+For admission runs the SLO is judged on the admitted streams, with the lateness bound at W + 50 = 150 ms. The "seconds over" column shows how often a single second crossed it, because a mean close to the bound can hide long stretches above it.
 
 ## Results
 
@@ -225,13 +239,58 @@ CPU per token falls with load even without coalescing (14.0 → 11.8 → 10.1 µ
 
 The server exports `tensorgate_stream_flush_events` (events per flush) to check how much batching happens in production.
 
+### 6. Admission control
+
+With `-admission` every request to the completions endpoint passes three layers in order:
+
+1. **API key** (`X-Api-Key` or `Authorization: Bearer`): no key, `401`.
+2. **Per-key token bucket** (`-rate-per-key 20`, `-burst-per-key 40`): empty bucket, `429` with `Retry-After`. It runs before the stream limit so that a client over its rate cannot take a slot or stand in the queue. Keys that stay idle for `-key-ttl` are forgotten, and above `-max-keys` new keys get `429`, which bounds memory against a flood of random keys.
+3. **Stream limit** (`-max-streams 5000`): a request takes a free slot at once; if none is free it waits up to `-max-queue-wait` (20 ms) and then gets `503` with `Retry-After`. The wait is bounded in **time**, not in queue length: a queue length says nothing about how long the last request in it waits. A client that goes away while waiting is counted separately (`client_gone`) and gets no response.
+
+`Retry-After` is whole seconds: rounded up, at least 1, at most 60, plus random jitter. The jitter differs by reason. A `429` client knows when its token comes back, so `-rate-limit-jitter` is 1 s. A `503` is sent to many clients at the same moment; if they all retried after the same time they would return together, so `-overload-jitter` is 10 s to spread them.
+
+Exported: `tensorgate_admission_requests_total{result}` (`accepted`, `rejected_429`, `rejected_503`, `client_gone`), `tensorgate_admission_queue_wait_seconds`, `tensorgate_admission_tracked_keys`. The API key is not a label, to keep the cardinality bounded. The middleware costs ~170 ns and no allocations per accepted request (`BenchmarkMiddlewareAccepted`).
+
+**Scenario.** `loadgen` with 8000 streams against 5000 slots, spread over 1000 keys so that the rate limit stays out of the way and the stream limit is what is measured. Each stream is 2000 tokens at TPOT 30 ms, 60 s; a client that finishes starts the next request, and one that is rejected retries after the `Retry-After` it received. Offered load is 8000 streams of demand (266.7k tok/s) for a gateway that holds about 5000 (166.7k tok/s). The runs are back to back on the same VMs, 3 minutes each; values are means of the per-second values in seconds 41–175.
+
+| Run | Queue wait | 503 jitter | Slots | Lateness p99 | Seconds over 150 ms | Worst second | Delivered | 503 per second | Server CPU | Data |
+|---|---|---|---|---|---|---|---|---|---|---|
+| No admission | – | – | – | **824.8 ms** | 135 / 135 | 962 ms | 99.6% | 0 | 99.9% | `r2-off` |
+| Defaults, run A | 20 ms | 10 s | 5000 | **126.5 ms** | 3 / 135 | 175 ms | 99.5% | 538 | 83% | `r2-default-a` |
+| Defaults, run B | 20 ms | 10 s | 5000 | **128.7 ms** | 3 / 135 | 171 ms | 99.4% | 540 | 89% | `r2-default-b` |
+| Shorter wait | 10 ms | 10 s | 5000 | 118.7 ms | 2 / 135 | 157 ms | 99.6% | 542 | 86% | `r2-qw10` |
+| Longer wait | 50 ms | 10 s | 5000 | 151.6 ms | 110 / 135 | 212 ms | 99.1% | 533 | 87% | `r2-qw50` |
+| First attempt | 50 ms | 1 s | 5000 | 221.4 ms | 114 / 135 | 415 ms | 96.4% | **2689** | 94% | `admission` |
+| Wider jitter | 50 ms | 10 s | 5000 | 156.0 ms | 111 / 135 | 198 ms | 99.1% | 533 | 91% | `admission-jitter10` |
+| Fewer slots | 50 ms | 10 s (assumed) | 4000 | 147.3 ms | 107 / 135 | 196 ms | 98.7% | 713 | 75% | `admission-slots4000` |
+
+"Delivered" is tok/s over the demand of the streams in flight (inflight ÷ TPOT), so for the admission runs it is the demand of the admitted streams. The `r2-*` rows ran with the final code. The last three rows come from the first session, with older code that had a single `-retry-jitter` for `429` and `503` alike; the flags were not saved in their run directories, so "1 s", "10 s" and the 10 s of "Fewer slots" come from how the runs were started (for the last one inferred from the order of the runs, so treat it as an assumption). With 1000 keys and no key over its rate only `503`s occur, so the single jitter does not change what those rows measure.
+
+![Lateness p99 per second with and without admission control](bench/2026-11-18-r2-p99.png)
+
+Interactive version with all runs, a zoom to 0–250 ms, a `503` per second panel and a table view: [`bench/2026-11-18-r2-p99.html`](bench/2026-11-18-r2-p99.html) (open the file in a browser). Regenerate it with `python3 bench/scripts/plot_admission.py bench/2026-11-18-r2 -o bench/2026-11-18-r2-p99.html`.
+
+- **The limit keeps the admitted streams within the SLO.** Without it lateness p99 is 825 ms for all 8000 streams, in every second of the window; the server is at 99.9% CPU. With the defaults the 5000 admitted streams sit at ~128 ms, 3 seconds in 135 cross 150 ms, and 99.5% of their demand is delivered. About 84% of the requests were answered `503`: that follows from the scenario (8000 clients, 5000 slots), and is not a cost of the mechanism.
+- **A `503` without a spread of retries is not backpressure.** At the 1 s jitter the rejected clients came back ~2700 times a second, against ~540 at 10 s, and lateness p99 was 221 ms against 156 ms with everything else equal. A plausible reason, not separately measured: a rejected request still costs an accept, a parse and a response, and thousands of them a second compete with the admitted streams for the same 2 vCPU.
+- **Waiting costs.** Every rejected request waits the whole `-max-queue-wait` (the mean wait over all requests was 18.8 ms at 20 ms and 47 ms at 50 ms), and an admitted request that had to wait carries that wait in its lateness. 50 ms fails the SLO (151.6 ms; 156.0 ms in the earlier run of the same setting), 20 ms and 10 ms pass.
+- **20 ms rather than 10 ms.** 10 ms is a little better here (118.7 against 126.5 and 128.7), but this is a single run, the difference is smaller than the 2.2 ms between the two runs of the default, and a very short wait rejects requests that would have found a free slot a few milliseconds later in a short burst, which this scenario does not contain. 20 ms is a compromise, not a measured optimum.
+- **Fewer slots buy little.** 4000 slots at 50 ms gave 147.3 ms against 156.0 ms at 5000, but with 1000 streams less capacity and 713 instead of 533 rejections a second, and it still spent 107 of 135 seconds above 150 ms. The wait is the stronger lever. 5000 is the capacity from [result 5](#5-flush-coalescing): at 6000 streams the CPU is 96% busy.
+- **The CPU of the two runs of the defaults differs by 6 points** (83% and 89%) while lateness is within 2 ms, so the CPU column is not precise enough to compare configurations.
+
+The defaults in `cmd/tensorgate/config.go` were chosen from these runs: 5000 slots, 20 ms wait, 10 s `503` jitter, 1 s `429` jitter.
+
 ## Limitations
 
 - **Mock backend:** perfectly regular tokens of ~10 bytes. A real model has bursty output, larger tokens and its own latency, and the coalescing trade-off may land differently.
-- **Shared vCPU and a shared provider network:** the same configuration gave 1.5% and 3.3% retransmits in different runs (5000 streams in [3](#3-egress-qdisc), 4500 in [4](#4-capacity-without-coalescing)). Every number here comes from a single 3-minute run; capacity boundaries need 2–3 repeats before they can be quoted with confidence.
+- **Shared vCPU and a shared provider network:** the same configuration gave 1.5% and 3.3% retransmits in different runs (5000 streams in [3](#3-egress-qdisc), 4500 in [4](#4-capacity-without-coalescing)). Every number here comes from a single 3-minute run (the admission defaults from two); capacity boundaries need 2–3 repeats before they can be quoted with confidence.
 - **Step resolution:** capacity was searched in steps of 500–1000 streams.
 - **Client-side measurement:** latency includes the network round trip (~0.5 ms) and the client's own scheduling. The client had ≥ 50% idle CPU, but its receive softirq ran on a single core.
 - **The baseline capacity of ≤ ~3400 streams** is its throughput ceiling (112.9k tok/s ÷ 33.3 tok/s per stream), not a measured SLO boundary.
+- **Admission control, one scenario:** constant overload of 8000 streams against 5000 slots. A sudden burst, a slow ramp and a load that falls and rises again were not run.
+- **Admission, polite clients:** `loadgen` waits the `Retry-After` it is given. Clients that ignore it or retry at once are the case the jitter is meant for, and `-honor-retry-after=false` was not run. The numbers hold only if the clients behave.
+- **Admission, the `429` path at scale:** the 1000 keys never exceeded their rate, so only `503` was measured under load. `429` and the key table are covered by unit tests (`go test -race ./internal/admission/`) and `KEYS=1` in `admission.sh` is meant to show it, but that was not run.
+- **Admission, noise:** the two runs of the defaults differ by 2.2 ms in lateness p99, and the 10 ms against 20 ms difference (8 ms) was measured once. The server CPU of the two default runs differs by 6 points. The first-session runs (last three rows of result 6) have no saved flags, and used the older code with a single retry jitter.
+- **Admission, lateness includes the wait for a slot,** so it is the delay an admitted user sees, not the cost of the gateway alone.
 - **HTTP/1.1 only, one connection per stream,** as OpenAI SDK clients do by default. HTTP/2 would multiplex streams onto fewer connections and change the packet math.
 
 ## Reproducing
@@ -251,11 +310,21 @@ The server exports `tensorgate_stream_flush_events` (events per flush) to check 
    ./loadgen-linux -url http://<server private IP>:8080/v1/chat/completions \
      -streams 5000 -rate 200 -tokens 2000 -tpot 30ms -duration 3m
    ```
+   For [result 6](#6-admission-control) start the server with `-admission` (the defaults are the tested ones) and the client with `-streams 8000 -keys 1000 -csv run.csv`.
 4. **Profiles:** pprof listens on the server's loopback only:
    ```bash
    ssh -L 6060:localhost:6060 root@<server>
    go tool pprof -http=:8000 'http://localhost:6060/debug/pprof/profile?seconds=30'
    ```
+
+To create and delete the two VMs, use `bench/scripts/up.sh` (needs the `hcloud` CLI, an uploaded SSH key and `make bench-build`; it applies the kernel settings above and writes `bench/env.sh`) and `bench/scripts/down.sh`. They are billed by the hour until `down.sh` deletes them. `bench/scripts/admission.sh` then runs result 6:
+
+```bash
+SSH_KEY=<key name> bench/scripts/up.sh && source bench/env.sh
+OUT=bench/<date>-admission bench/scripts/admission.sh            # off, then on, with the default flags
+MODES=on ADM_FLAGS='-admission -max-queue-wait 50ms' OUT=bench/<dir> bench/scripts/admission.sh
+bench/scripts/down.sh -y
+```
 
 Scripts used for the tables, in [`bench/scripts`](bench/scripts). They take `SRV`, `CLI`, `SRV_PRIV` and optionally `IF`, `OUT` from the environment:
 
@@ -267,10 +336,13 @@ Scripts used for the tables, in [`bench/scripts`](bench/scripts). They take `SRV
 | `coalesce.sh` | flush interval × stream count |
 | `steady.awk` | steady-state means for loadgen logs before `07f5716` |
 | `late.awk` | steady-state means for loadgen logs from `07f5716` on, with lateness |
+| `up.sh`, `down.sh` | create and delete the two VMs and their private network (label `bench=tgbench`) |
+| `admission.sh` | result 6: `MODES` (`off on`), `STREAMS`, `KEYS`, `DUR_S`, `ADM_FLAGS`, `OUT`; collects loadgen CSV and log, `mpstat` on both VMs, the server log and the `tensorgate_admission_*` metrics |
+| `plot_admission.py` | the lateness chart of result 6 from the run directories (`PREFIX-off`, `-default-a`, `-default-b`, `-qw50`) |
 
 ## Raw data
 
-Per run: loadgen log, server and client `mpstat`, server `nstat` deltas, qdisc stats or flush metrics, CPU profiles where taken.
+Per run: loadgen log, server and client `mpstat`, server `nstat` deltas, qdisc stats or flush metrics, CPU profiles where taken. The admission runs have the loadgen CSV (one row per second) and the server's `tensorgate_admission_*` metrics at the end of the run instead of `nstat` and profiles.
 
 | Directory | Section |
 |---|---|
@@ -278,3 +350,7 @@ Per run: loadgen log, server and client `mpstat`, server `nstat` deltas, qdisc s
 | [`bench/2026-11-11-qdisc`](bench/2026-11-11-qdisc) | 3 |
 | [`bench/2026-11-11-capacity-fq`](bench/2026-11-11-capacity-fq) | 4 |
 | [`bench/2026-11-11-coalesce`](bench/2026-11-11-coalesce) | 5 |
+| [`bench/2026-11-18-r2-off`](bench/2026-11-18-r2-off), [`-default-a`](bench/2026-11-18-r2-default-a), [`-default-b`](bench/2026-11-18-r2-default-b), [`-qw10`](bench/2026-11-18-r2-qw10), [`-qw50`](bench/2026-11-18-r2-qw50) | 6, final code |
+| [`bench/2026-11-18-admission`](bench/2026-11-18-admission), [`-jitter10`](bench/2026-11-18-admission-jitter10), [`-slots4000`](bench/2026-11-18-admission-slots4000) | 6, first session: older code with a single retry jitter, kept as the history that led to the defaults |
+| [`bench/smoke-admission`](bench/smoke-admission) | 6, a short check of the scripts before the real runs; not used in any table |
+| [`bench/2026-11-18-r2-p99.html`](bench/2026-11-18-r2-p99.html), [`.png`](bench/2026-11-18-r2-p99.png) | 6, the chart |
