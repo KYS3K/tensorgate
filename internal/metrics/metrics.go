@@ -19,18 +19,55 @@ const (
 	OutcomeWriteError     Outcome = "write_error"
 )
 
+type AdmissionResult string
+
+const (
+	AdmissionAccepted    AdmissionResult = "accepted"
+	AdmissionRejected429 AdmissionResult = "rejected_429"
+	AdmissionRejected503 AdmissionResult = "rejected_503"
+	AdmissionClientGone  AdmissionResult = "client_gone" // left while waiting for a slot
+)
+
 type Metrics struct {
+	factory promauto.Factory
+
 	activeStreams prometheus.Gauge
 	requestsTotal *prometheus.CounterVec
 	ttftSeconds   prometheus.Histogram
 	tpotSeconds   prometheus.Histogram
 	flushEvents   prometheus.Histogram
+
+	// counters are resolved once: WithLabelValues on the request path would hash and look up a map every time
+	admissionAccepted    prometheus.Counter
+	admissionRejected429 prometheus.Counter
+	admissionRejected503 prometheus.Counter
+	admissionClientGone  prometheus.Counter
+	queueWaitSeconds     prometheus.Histogram
 }
 
 func New(reg prometheus.Registerer) *Metrics {
 	factory := promauto.With(reg)
 
+	admissionTotal := factory.NewCounterVec(prometheus.CounterOpts{
+		Name: "tensorgate_admission_requests_total",
+		Help: "Requests seen by admission control, by result.",
+	}, []string{"result"})
+
 	return &Metrics{
+		factory: factory,
+
+		admissionAccepted:    admissionTotal.WithLabelValues(string(AdmissionAccepted)),
+		admissionRejected429: admissionTotal.WithLabelValues(string(AdmissionRejected429)),
+		admissionRejected503: admissionTotal.WithLabelValues(string(AdmissionRejected503)),
+		admissionClientGone:  admissionTotal.WithLabelValues(string(AdmissionClientGone)),
+		// the buckets are fine-grained on purpose: the wait is capped at tens of milliseconds
+		// and p99 is interpolated inside a bucket, so coarse buckets would flatten the chart
+		queueWaitSeconds: factory.NewHistogram(prometheus.HistogramOpts{
+			Name:    "tensorgate_admission_queue_wait_seconds",
+			Help:    "Time a request waited for a stream slot; 0 when a slot was free. Includes requests shed with 503.",
+			Buckets: []float64{0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.03, 0.05, 0.1},
+		}),
+
 		activeStreams: factory.NewGauge(prometheus.GaugeOpts{
 			Name: "tensorgate_active_streams",
 			Help: "Number of completions streams currently open.",
@@ -98,4 +135,41 @@ func (m *Metrics) ObserveFlush(events int) {
 		return
 	}
 	m.flushEvents.Observe(float64(events))
+}
+
+// AdmissionDone counts one request by its admission result. An unknown result is ignored
+func (m *Metrics) AdmissionDone(result AdmissionResult) {
+	if m == nil {
+		return
+	}
+	switch result {
+	case AdmissionAccepted:
+		m.admissionAccepted.Inc()
+	case AdmissionRejected429:
+		m.admissionRejected429.Inc()
+	case AdmissionRejected503:
+		m.admissionRejected503.Inc()
+	case AdmissionClientGone:
+		m.admissionClientGone.Inc()
+	}
+}
+
+func (m *Metrics) ObserveQueueWait(d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.queueWaitSeconds.Observe(d.Seconds())
+}
+
+// TrackKeys exposes the number of rate-limiter keys currently in memory. size is called
+// on every scrape, so it must be cheap and safe for concurrent use. Call it at most once per registry:
+// a second registration of the same metric panics
+func (m *Metrics) TrackKeys(size func() int) {
+	if m == nil {
+		return
+	}
+	m.factory.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "tensorgate_admission_tracked_keys",
+		Help: "API keys currently tracked by the rate limiter.",
+	}, func() float64 { return float64(size()) })
 }
