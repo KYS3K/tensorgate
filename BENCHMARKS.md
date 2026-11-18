@@ -9,9 +9,9 @@ How many concurrent SSE completion streams one tensorgate process holds on 2 vCP
 | Stage | Change | Delivered at 5000 streams (demand 166.7k tok/s) | CPU per token at 5000 streams | Streams within SLO | Limited by |
 |---|---|---|---|---|---|
 | Baseline | `json.Marshal` + `fmt` per token | 112.9k tok/s (68%) | 17.7 µs | ≤ ~3400 (throughput ceiling) | CPU |
-| Zero-alloc token path | [`005681d`](#builds) | 165.2k tok/s (99%) | 11.8 µs | n/a: streams stalled for seconds | egress qdisc dropping packets |
+| Zero-alloc token path | [`1cf908e`](#builds) | 165.2k tok/s (99%) | 11.8 µs | n/a: streams stalled for seconds | egress qdisc dropping packets |
 | + `fq` qdisc | kernel setting | 165.7k tok/s | 11.6 µs | 3500, 4000 borderline | packet loss in the virtual network above ~125k packets/s |
-| + flush coalescing, 100 ms | [`9d2887a`](#builds) | 166.2k tok/s | 10.3 µs | **6000** (highest tested) | CPU (96% busy at 6000) |
+| + flush coalescing, 100 ms | [`f7c3c68`](#builds) | 166.2k tok/s | 10.3 µs | **6000** (highest tested) | CPU (96% busy at 6000) |
 
 TPOT 30 ms throughout. "Streams within SLO" uses the SLOs defined [below](#slos).
 
@@ -71,12 +71,12 @@ Server, from [result 3](#3-egress-qdisc) on: `net.core.default_qdisc = fq` plus 
 | Commit | What it adds |
 |---|---|
 | `4a26300` | baseline |
-| `d468b3f` | pprof on `127.0.0.1:6060` (`-pprof`) |
-| `d456087` | `cmd/loadgen` |
-| `005681d` | zero-alloc token path |
-| `07f5716` | token lateness in loadgen |
-| `9d2887a` | flush coalescing, `-flush-interval` (default 100 ms) |
-| `c9a7122`, `f69494f`, `06cccd9` | admission control (`internal/admission`, `-admission` and its flags), `loadgen` `-keys`, `-honor-retry-after`, `-csv`; result 6 only. The runs were made from the working tree just before these commits |
+| `d8bd168` | pprof on `127.0.0.1:6060` (`-pprof`) |
+| `fedac92` | `cmd/loadgen` |
+| `1cf908e` | zero-alloc token path |
+| `37bd751` | token lateness in loadgen |
+| `f7c3c68` | flush coalescing, `-flush-interval` (default 100 ms) |
+| `5da9a3a`, `f671955`, `8ebfed4` | admission control (`internal/admission`, `-admission` and its flags), `loadgen` `-keys`, `-honor-retry-after`, `-csv`; result 6 only. The runs were made from the working tree just before these commits |
 
 The baseline binary was `4a26300` plus the pprof listener.
 
@@ -334,8 +334,8 @@ Scripts used for the tables, in [`bench/scripts`](bench/scripts). They take `SRV
 | `qdisc.sh` | `fq_codel`, `fq` and `pfifo` |
 | `steps.sh` | stepped stream counts |
 | `coalesce.sh` | flush interval × stream count |
-| `steady.awk` | steady-state means for loadgen logs before `07f5716` |
-| `late.awk` | steady-state means for loadgen logs from `07f5716` on, with lateness |
+| `steady.awk` | steady-state means for loadgen logs before `37bd751` |
+| `late.awk` | steady-state means for loadgen logs from `37bd751` on, with lateness |
 | `up.sh`, `down.sh` | create and delete the two VMs and their private network (label `bench=tgbench`) |
 | `admission.sh` | result 6: `MODES` (`off on`), `STREAMS`, `KEYS`, `DUR_S`, `ADM_FLAGS`, `OUT`; collects loadgen CSV and log, `mpstat` on both VMs, the server log and the `tensorgate_admission_*` metrics |
 | `plot_admission.py` | the lateness chart of result 6 from the run directories (`PREFIX-off`, `-default-a`, `-default-b`, `-qw50`) |

@@ -1,4 +1,4 @@
-# Steady-state means (seconds 40-175) of a loadgen log from 07f5716 on, with lateness columns.
+# Steady-state means (seconds 40-175) of a loadgen log from 37bd751 on, with lateness columns.
 # usage: awk -v name=<label> -f late.awk run.log
 function ms(v) { if (v ~ /^>/) return 10000; if (v == "-") return 0; if (v ~ /ms$/) { sub(/ms$/, "", v); return v + 0 } sub(/s$/, "", v); return v * 1000 }
 $1 != "elapsed" && /\|/ { k++; if (k > 40 && k <= 175) {
