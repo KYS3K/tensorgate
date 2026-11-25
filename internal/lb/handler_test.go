@@ -38,7 +38,7 @@ func startGatewayCfg(t *testing.T, cfg Config, retryAfter, jitter time.Duration,
 	}
 	t.Cleanup(p.Close)
 
-	h, err := NewHandler(p, retryAfter, jitter)
+	h, err := NewHandler(p, retryAfter, jitter, nil)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestNewHandler_Errors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h, err := NewHandler(tt.p, tt.retryAfter, tt.jitter)
+			h, err := NewHandler(tt.p, tt.retryAfter, tt.jitter, nil)
 			if err == nil {
 				t.Fatalf("NewHandler() = %v, want error", h)
 			}

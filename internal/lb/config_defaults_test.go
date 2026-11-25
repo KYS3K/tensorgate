@@ -20,6 +20,11 @@ func TestWithDefaults_FillsZeroValues(t *testing.T) {
 		RiseThreshold:         defaultRiseThreshold,
 		PassiveThreshold:      defaultPassiveThreshold,
 		HealthPath:            "/healthz",
+		MaxBodyBytes:          defaultMaxBodyBytes,
+		MaxAttempts:           defaultMaxAttempts,
+		RetryBudgetPercent:    defaultRetryBudgetPercent,
+		RetryBudgetWindow:     defaultRetryBudgetWindow,
+		RetryMinPerSec:        defaultRetryMinPerSec,
 	}
 	if got.Upstreams != nil {
 		t.Errorf("Upstreams = %v, want nil", got.Upstreams)
@@ -42,6 +47,11 @@ func TestWithDefaults_KeepsExplicitValues(t *testing.T) {
 		RiseThreshold:         8,
 		PassiveThreshold:      9,
 		HealthPath:            "/ping",
+		MaxBodyBytes:          10,
+		MaxAttempts:           3,
+		RetryBudgetPercent:    11,
+		RetryBudgetWindow:     12 * time.Second,
+		RetryMinPerSec:        13,
 	}
 	if got := in.withDefaults(); !reflect.DeepEqual(got, in) {
 		t.Errorf("withDefaults() overwrote explicit values: got %+v, want %+v", got, in)

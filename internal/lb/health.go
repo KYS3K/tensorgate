@@ -37,12 +37,17 @@ func checkLoop(ctx context.Context, b *Backend, cfg Config) {
 			if ctx.Err() != nil {
 				return // probe was cut by shutdown
 			}
-			if ok {
-				successes++
-				failed = 0
-			} else {
+			// successes count only while dead, or a passive ejection is undone by the next probe
+			switch {
+			case !ok:
 				failed++
 				successes = 0
+			case b.Alive():
+				failed = 0
+				successes = 0
+			default:
+				failed = 0
+				successes++
 			}
 			if failed >= cfg.FailThreshold && b.Alive() {
 				b.kill()

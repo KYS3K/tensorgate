@@ -50,9 +50,12 @@ func TestNewBackend_ZeroConfigHasPassiveThreshold(t *testing.T) {
 
 func TestPassive_DeadUpstreamCountsAndAnswers502(t *testing.T) {
 	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {})
-	gw, p := startGatewayCfg(t, Config{PassiveThreshold: 3}, time.Second, 0, up)
+	spare := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {})
+	// the last working backend is never ejected, so there must be a spare one; it is made busy to never be picked
+	gw, p := startGatewayCfg(t, Config{PassiveThreshold: 3, MaxAttempts: 1}, time.Second, 0, up, spare)
+	busy(t, p, spare)
 	up.Close()
-	b := p.Backends()[0]
+	b := backendFor(t, p, up)
 
 	for i := 1; i <= 3; i++ {
 		resp, err := http.Get(gw.URL)
@@ -183,6 +186,13 @@ func TestErrorHandler_CanceledIsNotAFailure(t *testing.T) {
 		t.Error("context.Canceled killed the backend")
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 0)
+	defer cancel()
+	b.errorHandler(rec, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx), context.DeadlineExceeded)
+	if !b.Alive() {
+		t.Error("our own request deadline killed the backend")
+	}
+
 	b.errorHandler(rec, httptest.NewRequest(http.MethodGet, "/", nil), errors.New("connection refused"))
 	if b.Alive() {
 		t.Error("a network error did not count")
@@ -219,7 +229,9 @@ func TestPassive_Bare503StillCounts(t *testing.T) {
 	up := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	})
-	gw, p := startGatewayCfg(t, Config{PassiveThreshold: 2}, time.Second, 0, up)
+	spare := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {})
+	gw, p := startGatewayCfg(t, Config{PassiveThreshold: 2, MaxAttempts: 1}, time.Second, 0, up, spare)
+	busy(t, p, spare)
 
 	for range 2 {
 		resp, err := http.Get(gw.URL)
@@ -228,7 +240,7 @@ func TestPassive_Bare503StillCounts(t *testing.T) {
 		}
 		resp.Body.Close()
 	}
-	if p.Backends()[0].Alive() {
+	if backendFor(t, p, up).Alive() {
 		t.Error("two bare 503 did not kill the backend")
 	}
 }

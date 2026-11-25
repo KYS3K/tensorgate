@@ -65,6 +65,15 @@ func parseFlags() config {
 	flag.IntVar(&l.RiseThreshold, "lb-rise-threshold", 0, "lb: good probes in a row that bring a dead upstream back (default 2)")
 	flag.IntVar(&l.PassiveThreshold, "lb-passive-threshold", 0, "lb: consecutive failed real requests (network error, 502/503/504) that mark an upstream dead (default 3)")
 	flag.StringVar(&l.HealthPath, "lb-health-path", "", `lb: path probed on every upstream (default "/healthz")`)
+	flag.Int64Var(&l.MaxBodyBytes, "lb-max-body", 0, "lb: request body limit in bytes, the body is buffered to be replayed on retry; above it the client gets 413 (default 1 MiB)")
+	flag.DurationVar(&l.ResponseHeaderTimeout, "lb-header-timeout", 0,
+		"lb: how long an upstream may take to send response headers, which for a model is about its TTFT; keep it above the TTFT p99 with a margin (default 10s)")
+	flag.IntVar(&l.MaxAttempts, "lb-max-attempts", 0, "lb: tries per request, 1 turns retries off (default 2)")
+	flag.IntVar(&l.RetryBudgetPercent, "lb-retry-budget-percent", 0,
+		"lb: retries are limited to this percent of the requests of the last -lb-retry-budget-window (default 20)")
+	flag.DurationVar(&l.RetryBudgetWindow, "lb-retry-budget-window", 0, "lb: window of the retry budget, whole seconds (default 10s)")
+	flag.IntVar(&l.RetryMinPerSec, "lb-retry-min-per-sec", 0,
+		"lb: retries per second allowed on top of the percentage, so a quiet gateway can still retry (default 1)")
 	flag.DurationVar(&c.lbRetryAfter, "lb-retry-after", 2*time.Second,
 		"lb: Retry-After of the 503 sent when every upstream is dead")
 	flag.DurationVar(&c.lbRetryAfterJitter, "lb-retry-after-jitter", time.Second,

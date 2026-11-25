@@ -3,6 +3,7 @@ package lb
 import (
 	"context"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -12,12 +13,14 @@ import (
 
 type Backend struct {
 	URL           *url.URL
+	Name          string // metrics label: the host, with the scheme when two upstreams share a host
 	inFlight      atomic.Int64
 	alive         atomic.Bool
 	passiveFails  atomic.Int32
 	transport     *http.Transport
 	proxy         *httputil.ReverseProxy
 	failThreshold int
+	pool          *Pool // nil for a backend built alone, which may then always be ejected
 	HealthPath    string
 }
 
@@ -28,7 +31,8 @@ func newBackend(u *url.URL, cfg Config) *Backend {
 	}
 
 	b := &Backend{
-		URL: u,
+		URL:  u,
+		Name: u.Host,
 		transport: &http.Transport{
 			MaxIdleConnsPerHost:   dcfg.MaxIdleConnsPerHost,
 			IdleConnTimeout:       dcfg.IdleConnTimeout,
@@ -54,25 +58,36 @@ func newBackend(u *url.URL, cfg Config) *Backend {
 }
 
 func (b *Backend) modifyResponse(r *http.Response) error {
-	if r.StatusCode == http.StatusServiceUnavailable && r.Header.Get("Retry-After") != "" {
+	if shedding(r.StatusCode, r.Header) {
 		return nil
 	}
-	if r.StatusCode == http.StatusServiceUnavailable ||
-		r.StatusCode == http.StatusBadGateway ||
-		r.StatusCode == http.StatusGatewayTimeout {
-		b.onFail()
-	} else {
+	if !failedBeforeClient(r.StatusCode, r.Header) {
 		b.onSuccess()
+		return nil
+	}
+	b.onFail()
+	if retryableStatus(r.StatusCode, r.Header) && takeRetry(r.Request.Context(), b.budget()) {
+		return errRetry
 	}
 	return nil
 }
 
 func (b *Backend) errorHandler(rw http.ResponseWriter, r *http.Request, err error) {
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) || r.Context().Err() != nil || errors.Is(err, errRetry) {
 		return
 	}
 	b.onFail()
-	http.Error(rw, "lb: service unavailable", http.StatusBadGateway)
+	if retryableError(err) && takeRetry(r.Context(), b.budget()) {
+		return
+	}
+	http.Error(rw, "lb: bad gateway", http.StatusBadGateway)
+}
+
+func (b *Backend) budget() *retryBudget {
+	if b.pool == nil {
+		return nil
+	}
+	return b.pool.budget
 }
 
 func (b *Backend) Release() {
@@ -97,11 +112,13 @@ func (b *Backend) Alive() bool {
 
 func (b *Backend) kill() {
 	b.alive.Store(false)
+	log.Printf("lb: upstream %s is dead: health probes keep failing", b.URL.Host)
 }
 
 func (b *Backend) resurrect() {
 	b.alive.Store(true)
 	b.passiveFails.Store(0)
+	log.Printf("lb: upstream %s is back: health probes pass again", b.URL.Host)
 }
 
 func (b *Backend) onSuccess() {
@@ -110,9 +127,14 @@ func (b *Backend) onSuccess() {
 
 func (b *Backend) onFail() {
 	fails := b.passiveFails.Add(+1)
-	if fails >= int32(b.failThreshold) {
-		b.alive.Store(false)
+	if fails < int32(b.failThreshold) {
+		return
 	}
+	if b.pool == nil {
+		b.alive.Store(false)
+		return
+	}
+	b.pool.eject(b)
 }
 
 func (b *Backend) HealthPathURL() string {

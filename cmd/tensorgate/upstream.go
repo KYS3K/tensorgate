@@ -32,7 +32,7 @@ func newCompletionsHandler(cfg config, m *metrics.Metrics) (h http.Handler, stop
 	if err != nil {
 		return nil, nil, err
 	}
-	handler, err := lb.NewHandler(pool, cfg.lbRetryAfter, cfg.lbRetryAfterJitter)
+	handler, err := lb.NewHandler(pool, cfg.lbRetryAfter, cfg.lbRetryAfterJitter, m)
 	if err != nil {
 		pool.Close()
 		return nil, nil, fmt.Errorf("lb: %w", err)

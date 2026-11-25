@@ -23,6 +23,16 @@ type Config struct {
 	PassiveThreshold int
 
 	HealthPath string
+
+	MaxBodyBytes int64
+
+	// MaxAttempts is the number of tries per request, 1 turns retries off.
+	MaxAttempts int
+	// Retries are limited to RetryBudgetPercent of the requests of the last
+	// RetryBudgetWindow, plus RetryMinPerSec per second so that a quiet gateway can still retry.
+	RetryBudgetPercent int
+	RetryBudgetWindow  time.Duration
+	RetryMinPerSec     int
 }
 
 const (
@@ -36,6 +46,13 @@ const (
 	defaultFailThreshold    = 3
 	defaultRiseThreshold    = 2
 	defaultPassiveThreshold = 3
+
+	defaultMaxBodyBytes = 1 << 20
+
+	defaultMaxAttempts        = 2
+	defaultRetryBudgetPercent = 20
+	defaultRetryBudgetWindow  = 10 * time.Second
+	defaultRetryMinPerSec     = 1
 )
 
 // withDefaults returns a copy of c where every field that is zero or negative
@@ -72,12 +89,30 @@ func (c Config) withDefaults() Config {
 	if len(c.HealthPath) == 0 {
 		c.HealthPath = "/healthz"
 	}
+	if c.MaxBodyBytes <= 0 {
+		c.MaxBodyBytes = defaultMaxBodyBytes
+	}
+	if c.MaxAttempts <= 0 {
+		c.MaxAttempts = defaultMaxAttempts
+	}
+	if c.RetryBudgetPercent <= 0 {
+		c.RetryBudgetPercent = defaultRetryBudgetPercent
+	}
+	if c.RetryBudgetWindow <= 0 {
+		c.RetryBudgetWindow = defaultRetryBudgetWindow
+	}
+	if c.RetryMinPerSec <= 0 {
+		c.RetryMinPerSec = defaultRetryMinPerSec
+	}
 	return c
 }
 
 func (c Config) validate() error {
 	if c.CheckTimeout >= c.CheckInterval {
 		return errors.New("CheckTimeout must be < CheckInterval")
+	}
+	if c.RetryBudgetWindow%time.Second != 0 {
+		return errors.New("RetryBudgetWindow must be whole seconds")
 	}
 
 	return nil

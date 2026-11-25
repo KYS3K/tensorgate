@@ -486,3 +486,22 @@ func TestHealth_ProbesArePacedByInterval(t *testing.T) {
 		t.Errorf("%d probes in 600ms with a 60ms interval, want about 10", got)
 	}
 }
+
+// Healthy probes while alive must not bank successes: a passive ejection of an
+// upstream with a fine /healthz then lasts RiseThreshold probes, not one.
+func TestHealth_PassiveEjectionIsNotUndoneByTheNextProbe(t *testing.T) {
+	cfg := healthCfg()
+	cfg.RiseThreshold = 3
+	s := newHealthUpstream(t, true)
+	p := startChecks(t, cfg, s.URL)
+	b := p.Backends()[0]
+
+	waitFor(t, "a few healthy probes", func() bool { return s.hits.Load() >= 5 })
+	b.kill()
+	before := s.hits.Load()
+
+	waitFor(t, "backend to come back", func() bool { return b.Alive() })
+	if got := s.hits.Load() - before; got < 3 {
+		t.Errorf("revived after %d probes since the ejection, want at least RiseThreshold=3", got)
+	}
+}

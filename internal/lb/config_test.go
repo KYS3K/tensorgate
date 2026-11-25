@@ -1,8 +1,10 @@
 package lb
 
 import (
+	"net/url"
 	"slices"
 	"testing"
+	"time"
 )
 
 func TestParseUpstreams(t *testing.T) {
@@ -99,5 +101,12 @@ func TestParseUpstreams(t *testing.T) {
 				t.Errorf("ParseUpstreams(%q) = %v, want %v", tt.in, gotStrs, tt.want)
 			}
 		})
+	}
+}
+
+func TestNewPool_RetryBudgetWindowMustBeWholeSeconds(t *testing.T) {
+	u, _ := url.Parse("http://127.0.0.1:8081")
+	if _, err := NewPool(Config{Upstreams: []*url.URL{u}, RetryBudgetWindow: 1500 * time.Millisecond}); err == nil {
+		t.Error("a 1.5s budget window was accepted, it would silently become 1s")
 	}
 }
