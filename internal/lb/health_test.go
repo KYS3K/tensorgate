@@ -472,3 +472,17 @@ func TestHealth_ShutdownDoesNotKillBackends(t *testing.T) {
 		t.Error("backend was killed by a probe that was canceled by the shutdown")
 	}
 }
+
+// Probes must be paced by CheckInterval. A loop without a ticker (or with a
+// default branch in the select) hammers /healthz as fast as it can.
+func TestHealth_ProbesArePacedByInterval(t *testing.T) {
+	s := newHealthUpstream(t, true)
+	startChecks(t, healthCfg(), s.URL) // 60ms interval
+
+	time.Sleep(600 * time.Millisecond)
+	got := s.hits.Load()
+	// about 10 expected; allow slack for a slow CI machine, but a busy loop gives thousands
+	if got < 3 || got > 15 {
+		t.Errorf("%d probes in 600ms with a 60ms interval, want about 10", got)
+	}
+}
