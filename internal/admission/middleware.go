@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/KYS3K/tensorgate/internal/metrics"
+	"github.com/KYS3K/tensorgate/internal/retryafter"
 )
 
 type Controller struct {
@@ -39,14 +40,14 @@ func (c *Controller) Middleware() func(http.Handler) http.Handler {
 			}
 			ok, retryAfter := c.keys.Allow(key, c.cfg.Now())
 			if !ok {
-				w.Header().Set("Retry-After", RetryAfter(retryAfter, c.cfg.RateLimitJitter))
+				w.Header().Set("Retry-After", retryafter.Format(retryAfter, c.cfg.RateLimitJitter))
 				http.Error(w, "Too many requests", http.StatusTooManyRequests)
 				c.metrics.AdmissionDone(metrics.AdmissionRejected429)
 				return
 			}
 			waited, err := c.gate.Acquire(r.Context())
 			if errors.Is(err, ErrOverloaded) {
-				w.Header().Set("Retry-After", RetryAfter(c.cfg.MaxQueueWait, c.cfg.OverloadJitter))
+				w.Header().Set("Retry-After", retryafter.Format(c.cfg.MaxQueueWait, c.cfg.OverloadJitter))
 				http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
 				c.metrics.AdmissionDone(metrics.AdmissionRejected503)
 				c.metrics.ObserveQueueWait(waited)

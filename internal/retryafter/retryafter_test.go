@@ -1,4 +1,4 @@
-package admission
+package retryafter
 
 import (
 	"math"
@@ -8,7 +8,7 @@ import (
 )
 
 // with jitter off the result is deterministic: it pins down rounding, the minimum and the cap
-func TestRetryAfterNoJitter(t *testing.T) {
+func TestFormatNoJitter(t *testing.T) {
 	tests := []struct {
 		name string
 		d    time.Duration
@@ -30,21 +30,21 @@ func TestRetryAfterNoJitter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := RetryAfter(tt.d, 0); got != tt.want {
-				t.Errorf("RetryAfter(%v, 0) = %q, want %q", tt.d, got, tt.want)
+			if got := Format(tt.d, 0); got != tt.want {
+				t.Errorf("Format(%v, 0) = %q, want %q", tt.d, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestRetryAfterNegativeJitterIsIgnored(t *testing.T) {
-	if got := RetryAfter(2100*time.Millisecond, -time.Second); got != "3" {
-		t.Errorf("RetryAfter(2.1s, -1s) = %q, want %q", got, "3")
+func TestFormatNegativeJitterIsIgnored(t *testing.T) {
+	if got := Format(2100*time.Millisecond, -time.Second); got != "3" {
+		t.Errorf("Format(2.1s, -1s) = %q, want %q", got, "3")
 	}
 }
 
 // with jitter on the result is random, so check the range and that it actually varies
-func TestRetryAfterJitterRange(t *testing.T) {
+func TestFormatJitterRange(t *testing.T) {
 	tests := []struct {
 		name   string
 		d      time.Duration
@@ -68,12 +68,12 @@ func TestRetryAfterJitterRange(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			seen := make(map[int]bool)
 			for range runs {
-				got, err := strconv.Atoi(RetryAfter(tt.d, tt.jitter))
+				got, err := strconv.Atoi(Format(tt.d, tt.jitter))
 				if err != nil {
 					t.Fatalf("RetryAfter returned a non-integer: %v", err)
 				}
 				if got < tt.min || got > tt.max {
-					t.Fatalf("RetryAfter(%v, %v) = %d, want in [%d, %d]", tt.d, tt.jitter, got, tt.min, tt.max)
+					t.Fatalf("Format(%v, %v) = %d, want in [%d, %d]", tt.d, tt.jitter, got, tt.min, tt.max)
 				}
 				seen[got] = true
 			}
@@ -86,9 +86,9 @@ func TestRetryAfterJitterRange(t *testing.T) {
 }
 
 // the 429/503 path is hot under overload: building the header must not allocate
-func BenchmarkRetryAfter(b *testing.B) {
+func BenchmarkFormat(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		RetryAfter(2100*time.Millisecond, 500*time.Millisecond)
+		Format(2100*time.Millisecond, 500*time.Millisecond)
 	}
 }

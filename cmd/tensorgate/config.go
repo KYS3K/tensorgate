@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/KYS3K/tensorgate/internal/admission"
+	"github.com/KYS3K/tensorgate/internal/lb"
 )
 
 type config struct {
@@ -14,6 +15,12 @@ type config struct {
 	// admission control is off by default so the benchmarks in BENCHMARKS.md measure the bare gateway
 	admissionOn bool
 	admission   admission.Config
+
+	// empty upstreams = answer with the built-in mock, otherwise balance over these URLs
+	upstreams          string
+	lb                 lb.Config // Upstreams is filled from the upstreams flag in run
+	lbRetryAfter       time.Duration
+	lbRetryAfterJitter time.Duration
 }
 
 func parseFlags() config {
@@ -47,6 +54,21 @@ func parseFlags() config {
 	// and the accepted streams' lateness p99 was 221 ms, at 10s it was 533 retries a second and 156 ms
 	flag.DurationVar(&a.OverloadJitter, "overload-jitter", 10*time.Second,
 		"admission: random time added to Retry-After of a 503; wide on purpose, it spreads the retries of the rejected clients")
+
+	flag.StringVar(&c.upstreams, "upstreams", "",
+		`comma-separated upstream URLs (scheme://host:port, no path) to balance over, e.g. "http://10.0.0.1:8000,http://10.0.0.2:8000"; "" answers with the built-in mock`)
+	l := &c.lb
+	// zero means "use the lb package default" for every lb flag below except the Retry-After ones
+	flag.DurationVar(&l.CheckInterval, "lb-check-interval", 0, "lb: time between health probes of one upstream (default 2s)")
+	flag.DurationVar(&l.CheckTimeout, "lb-check-timeout", 0, "lb: time an upstream has to answer a probe, must be below -lb-check-interval (default 1s)")
+	flag.IntVar(&l.FailThreshold, "lb-fail-threshold", 0, "lb: failed probes in a row that mark an upstream dead (default 3)")
+	flag.IntVar(&l.RiseThreshold, "lb-rise-threshold", 0, "lb: good probes in a row that bring a dead upstream back (default 2)")
+	flag.IntVar(&l.PassiveThreshold, "lb-passive-threshold", 0, "lb: consecutive failed real requests (network error, 502/503/504) that mark an upstream dead (default 3)")
+	flag.StringVar(&l.HealthPath, "lb-health-path", "", `lb: path probed on every upstream (default "/healthz")`)
+	flag.DurationVar(&c.lbRetryAfter, "lb-retry-after", 2*time.Second,
+		"lb: Retry-After of the 503 sent when every upstream is dead")
+	flag.DurationVar(&c.lbRetryAfterJitter, "lb-retry-after-jitter", time.Second,
+		"lb: random time added to that Retry-After")
 
 	flag.Parse()
 	return c

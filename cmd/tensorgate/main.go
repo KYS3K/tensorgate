@@ -29,8 +29,11 @@ func main() {
 func run(ctx context.Context, cfg config) error {
 	m := metrics.New(prometheus.DefaultRegisterer)
 
-	completions := gateway.NewCompletionsHandler(m)
-	completions.FlushInterval = cfg.flushInterval
+	completions, stopCompletions, err := newCompletionsHandler(cfg, m)
+	if err != nil {
+		return err
+	}
+	defer stopCompletions()
 
 	// the first middleware in the list is the outermost one: it sees the request first
 	var pipeline []func(http.Handler) http.Handler
