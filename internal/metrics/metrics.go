@@ -10,6 +10,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// LBNoBackend is the backend label of requests that never reached an upstream.
+const LBNoBackend = "-"
+
+// LBClasses are the outcome classes of a request that reached an upstream.
+var LBClasses = []string{"2xx", "3xx", "4xx", "5xx", "canceled", "aborted"}
+
 type Outcome string
 
 const (
@@ -37,6 +43,11 @@ type Metrics struct {
 	tpotSeconds   prometheus.Histogram
 	flushEvents   prometheus.Histogram
 
+	lbRequestsTotal        *prometheus.CounterVec
+	lbTTFTSeconds          *prometheus.HistogramVec
+	lbRetriesTotal         prometheus.Counter
+	lbRetryBudgetExhausted prometheus.Counter
+
 	// counters are resolved once: WithLabelValues on the request path would hash and look up a map every time
 	admissionAccepted    prometheus.Counter
 	admissionRejected429 prometheus.Counter
@@ -53,7 +64,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		Help: "Requests seen by admission control, by result.",
 	}, []string{"result"})
 
-	return &Metrics{
+	m := &Metrics{
 		factory: factory,
 
 		admissionAccepted:    admissionTotal.WithLabelValues(string(AdmissionAccepted)),
@@ -92,7 +103,30 @@ func New(reg prometheus.Registerer) *Metrics {
 			Help:    "SSE events sent per flush of a stream, i.e. per write to the client connection.",
 			Buckets: []float64{1, 2, 3, 4, 5, 6, 8, 10, 15, 20, 50},
 		}),
+		lbRequestsTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "tensorgate_lb_requests_total",
+			Help: "Requests that reached the load balancer, by upstream and outcome class (2xx, 3xx, 4xx, 5xx, canceled, aborted, no_backend).",
+		}, []string{"backend", "class"}),
+		lbRetriesTotal: factory.NewCounter(prometheus.CounterOpts{
+			Name: "tensorgate_lb_retries_total",
+			Help: "Requests sent to a second upstream after the first failed before anything reached the client.",
+		}),
+		lbRetryBudgetExhausted: factory.NewCounter(prometheus.CounterOpts{
+			Name: "tensorgate_lb_retry_budget_exhausted_total",
+			Help: "Retries that were not made because the retry budget was used up.",
+		}),
+		lbTTFTSeconds: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "tensorgate_lb_ttft_seconds",
+			Help:    "Time from request arrival at the load balancer to the first byte of a 2xx response body written to the client, by upstream.",
+			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+		}, []string{"backend"}),
 	}
+	// A counter that is created by its first increment shows up already at 1 (or 267), and rate() and
+	// increase() cannot see that jump: it has no earlier sample to start from. So every series is created at 0.
+	for _, class := range []string{"no_backend", "4xx"} {
+		m.lbRequestsTotal.WithLabelValues(LBNoBackend, class)
+	}
+	return m
 }
 
 func (m *Metrics) StreamStarted() {
@@ -172,4 +206,61 @@ func (m *Metrics) TrackKeys(size func() int) {
 		Name: "tensorgate_admission_tracked_keys",
 		Help: "API keys currently tracked by the rate limiter.",
 	}, func() float64 { return float64(size()) })
+}
+
+func (m *Metrics) LBRequestDone(backend, class string) {
+	if m == nil {
+		return
+	}
+	m.lbRequestsTotal.WithLabelValues(backend, class).Inc()
+}
+
+func (m *Metrics) LBRetry() {
+	if m == nil {
+		return
+	}
+	m.lbRetriesTotal.Inc()
+}
+
+func (m *Metrics) LBRetryBudgetExhausted() {
+	if m == nil {
+		return
+	}
+	m.lbRetryBudgetExhausted.Inc()
+}
+
+func (m *Metrics) ObserveLBTTFT(backend string, d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.lbTTFTSeconds.WithLabelValues(backend).Observe(d.Seconds())
+}
+
+// TrackBackend exposes the state of one upstream. Both functions are called on every scrape,
+// so they must be cheap and safe for concurrent use. Call it once per backend name and registry:
+// a second registration of the same name panics
+func (m *Metrics) TrackBackend(name string, alive func() bool, inFlight func() int64) {
+	if m == nil {
+		return
+	}
+	for _, class := range LBClasses {
+		m.lbRequestsTotal.WithLabelValues(name, class) // created at 0, see New
+	}
+	m.lbTTFTSeconds.WithLabelValues(name)
+	labels := prometheus.Labels{"backend": name}
+	m.factory.NewGaugeFunc(prometheus.GaugeOpts{
+		Name:        "tensorgate_lb_backend_alive",
+		Help:        "1 if the load balancer sends requests to this upstream, 0 if it is marked dead.",
+		ConstLabels: labels,
+	}, func() float64 {
+		if alive() {
+			return 1
+		}
+		return 0
+	})
+	m.factory.NewGaugeFunc(prometheus.GaugeOpts{
+		Name:        "tensorgate_lb_backend_inflight",
+		Help:        "Requests currently in flight to this upstream.",
+		ConstLabels: labels,
+	}, func() float64 { return float64(inFlight()) })
 }

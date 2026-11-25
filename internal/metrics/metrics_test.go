@@ -17,6 +17,11 @@ func TestNilMetricsIsNoop(t *testing.T) {
 	m.ObserveTTFT(time.Second)
 	m.ObserveTPOT(time.Second)
 	m.ObserveFlush(3)
+	m.LBRequestDone("b", "2xx")
+	m.ObserveLBTTFT("b", time.Second)
+	m.LBRetry()
+	m.LBRetryBudgetExhausted()
+	m.TrackBackend("b", func() bool { return true }, func() int64 { return 0 })
 }
 
 func TestMetrics(t *testing.T) {
