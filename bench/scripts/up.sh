@@ -2,11 +2,13 @@
 # Brings up the two bench VMs (server and load generator) on a private Hetzner network, applies the kernel
 # settings from BENCHMARKS.md, installs mpstat and copies the binaries from bin/.
 # Prints the variables the other scripts expect (SRV, CLI, SRV_PRIV, IF) and writes them to bench/env.sh.
+# With UPS=1 a third VM is added for the load balancer runs: it hosts the mock upstreams (UPS, UPS_PRIV).
 #
 # Needs: the hcloud CLI logged in (HCLOUD_TOKEN or `hcloud context create`), an SSH key already uploaded to
 # the Hetzner project, and `make bench-build` done. The VMs are billed by the hour until down.sh deletes them.
 #
 #   SSH_KEY=my-key bench/scripts/up.sh && source bench/env.sh
+#   UPS=1 SSH_KEY=my-key bench/scripts/up.sh && source bench/env.sh     # plus the upstream VM
 set -euo pipefail
 
 PREFIX=${PREFIX:-tgbench}
@@ -15,17 +17,21 @@ LOCATION=${LOCATION:-nbg1}
 ZONE=${ZONE:-eu-central}      # network zone that LOCATION belongs to
 SRV_TYPE=${SRV_TYPE:-cpx22}   # BENCHMARKS.md: 2 vCPU, 4 GB, shared AMD. Check the name: hcloud server-type list
 CLI_TYPE=${CLI_TYPE:-cpx32}   # 4 vCPU, 8 GB
+UPS=${UPS:-}                  # set to 1 to also create the upstream VM
+UPS_TYPE=${UPS_TYPE:-cpx22}   # 2 vCPU: three mockupstream processes need little
 IMAGE=${IMAGE:-ubuntu-26.04}  # BENCHMARKS.md ran Ubuntu 26.04. Check the name: hcloud image list --type system
 SRV_PRIV=10.77.1.10
 CLI_PRIV=10.77.1.11
+UPS_PRIV=10.77.1.12
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5)
 
 command -v hcloud >/dev/null || { echo "hcloud not found: https://github.com/hetznercloud/cli" >&2; exit 1; }
-for f in bin/tensorgate-linux bin/loadgen-linux; do
+for f in bin/tensorgate-linux bin/loadgen-linux ${UPS:+bin/mockupstream-linux}; do
   [ -f "$f" ] || { echo "$f is missing: run 'make bench-build' from the repo root" >&2; exit 1; }
 done
-if hcloud server describe "$PREFIX-srv" >/dev/null 2>&1 || hcloud server describe "$PREFIX-cli" >/dev/null 2>&1; then
-  echo "$PREFIX-srv or $PREFIX-cli already exists: run bench/scripts/down.sh first" >&2
+if hcloud server describe "$PREFIX-srv" >/dev/null 2>&1 || hcloud server describe "$PREFIX-cli" >/dev/null 2>&1 ||
+  hcloud server describe "$PREFIX-ups" >/dev/null 2>&1; then
+  echo "$PREFIX-srv, $PREFIX-cli or $PREFIX-ups already exists: run bench/scripts/down.sh first" >&2
   exit 1
 fi
 trap 'echo "up.sh failed: whatever was created is still billed, run bench/scripts/down.sh" >&2' ERR
@@ -43,6 +49,7 @@ create() { # name type private-ip
 }
 SRV_IP=$(create "$PREFIX-srv" "$SRV_TYPE" "$SRV_PRIV")
 CLI_IP=$(create "$PREFIX-cli" "$CLI_TYPE" "$CLI_PRIV")
+[ -n "$UPS" ] && UPS_IP=$(create "$PREFIX-ups" "$UPS_TYPE" "$UPS_PRIV")
 
 wait_ssh() {
   for _ in $(seq 60); do
@@ -54,6 +61,7 @@ wait_ssh() {
 }
 wait_ssh "$SRV_IP"
 wait_ssh "$CLI_IP"
+[ -n "$UPS" ] && wait_ssh "$UPS_IP"
 
 # $1 = "srv" or "cli", $2 = the private address of this VM. Prints the private interface name
 tune() {
@@ -83,10 +91,12 @@ REMOTE
 echo "=== tuning"
 IF=$(tune srv "$SRV_PRIV" "$SRV_IP" | tail -n 1)
 tune cli "$CLI_PRIV" "$CLI_IP" >/dev/null
+[ -n "$UPS" ] && tune cli "$UPS_PRIV" "$UPS_IP" >/dev/null
 
 echo "=== binaries"
 scp -q "${SSH_OPTS[@]}" bin/tensorgate-linux "root@$SRV_IP:/root/"
 scp -q "${SSH_OPTS[@]}" bin/loadgen-linux "root@$CLI_IP:/root/"
+[ -n "$UPS" ] && scp -q "${SSH_OPTS[@]}" bin/mockupstream-linux "root@$UPS_IP:/root/"
 
 cat > bench/env.sh <<EOF
 export SRV=root@$SRV_IP
@@ -94,6 +104,9 @@ export CLI=root@$CLI_IP
 export SRV_PRIV=$SRV_PRIV
 export IF=$IF
 EOF
+if [ -n "$UPS" ]; then
+  printf 'export UPS=root@%s\nexport UPS_PRIV=%s\n' "$UPS_IP" "$UPS_PRIV" >> bench/env.sh
+fi
 echo
 echo "ready. Next: source bench/env.sh"
 echo "when finished: bench/scripts/down.sh"

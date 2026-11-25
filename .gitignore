@@ -32,3 +32,5 @@ go.work.sum
 .DS_Store
 
 bench/env.sh
+# Packet captures
+*.pcap

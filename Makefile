@@ -21,9 +21,10 @@ build: ## build the binary into bin/
 	go build -trimpath -o $(BINARY) $(PKG)
 
 # static linux/amd64 binaries for the bench VMs; symbols are kept (no -s -w) so perf can resolve them
-bench-build: ## build linux/amd64 tensorgate + loadgen into bin/ for the bench VMs
+bench-build: ## build linux/amd64 tensorgate + loadgen + mockupstream into bin/ for the bench VMs
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/tensorgate-linux $(PKG)
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/loadgen-linux ./cmd/loadgen
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/mockupstream-linux ./cmd/mockupstream
 
 test: ## run all tests with the race detector
 	go test -race ./...
