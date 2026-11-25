@@ -1,0 +1,8 @@
+1795637831 20:17:11 load is steady: 800 streams, 3 upstreams, all healthy
+1795637951 20:19:11 INJECT kill -9 upstream B (:9002)
+1795638131 20:22:11 FIX start upstream B again
+1795638251 20:24:11 INJECT upstream C slow: +700ms on every request
+1795638431 20:27:11 FIX upstream C fast again
+1795638551 20:29:11 INJECT upstream A answers 502 to half of the completions
+1795638671 20:31:11 FIX upstream A healthy again
+1795638791 20:33:11 end of the game day

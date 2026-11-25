@@ -1,0 +1,76 @@
+# Alert rules for the tensorgate load balancer. The numbers come from SLO.md, read it first.
+# Check:  promtool check rules ops/alerts.yml && promtool test rules ops/alerts_test.yml
+groups:
+  - name: tensorgate-sli
+    rules:
+      # share of admitted requests that failed; "canceled" (the client left) is nobody's error
+      - record: tensorgate:lb_error_ratio:rate5m
+        expr: |
+          sum(rate(tensorgate_lb_requests_total{class=~"5xx|aborted|no_backend"}[5m]))
+          / sum(rate(tensorgate_lb_requests_total{class!="canceled"}[5m]))
+      - record: tensorgate:lb_error_ratio:rate1h
+        expr: |
+          sum(rate(tensorgate_lb_requests_total{class=~"5xx|aborted|no_backend"}[1h]))
+          / sum(rate(tensorgate_lb_requests_total{class!="canceled"}[1h]))
+      - record: tensorgate:lb_ttft_seconds:p99_2m
+        expr: histogram_quantile(0.99, sum by (le) (rate(tensorgate_lb_ttft_seconds_bucket[2m])))
+
+  - name: tensorgate-alerts
+    rules:
+      # The error budget of a 99.5% SLO is 0.5%. Burning it 14.4 times faster than allowed
+      # empties 2% of a 30 day budget in one hour. Both windows must agree: the long one says
+      # "this is not a blip", the short one says "it is still happening".
+      - alert: TensorgateErrorBudgetFastBurn
+        expr: |
+          tensorgate:lb_error_ratio:rate5m > (14.4 * 0.005)
+          and
+          tensorgate:lb_error_ratio:rate1h > (14.4 * 0.005)
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "More than 7.2% of requests fail, the monthly error budget is burning 14x too fast"
+          runbook: "RUNBOOK.md#tensorgateerrorbudgetfastburn"
+
+      # p99 time to the first byte above 500 ms. The healthy value on the bench stand is ~260 ms.
+      - alert: TensorgateTTFTHigh
+        expr: tensorgate:lb_ttft_seconds:p99_2m > 0.5
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "p99 time to first byte is above 500 ms"
+          runbook: "RUNBOOK.md#tensorgatettfthigh"
+
+      # One upstream is out of rotation. Users do not notice (retries cover for it), but the
+      # next failure may take the service down, so a person must look at it within hours.
+      - alert: TensorgateBackendDown
+        expr: tensorgate_lb_backend_alive == 0
+        for: 1m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Upstream {{ $labels.backend }} has been out of rotation for 1 minute"
+          runbook: "RUNBOOK.md#tensorgatebackenddown"
+
+      # An upstream that dies and comes back again and again. Each death is shorter than the minute that
+      # TensorgateBackendDown waits, so nobody is told, yet half of its requests may be failing and
+      # being hidden by retries. Four changes in ten minutes is two full dead-and-back cycles.
+      - alert: TensorgateBackendFlapping
+        expr: changes(tensorgate_lb_backend_alive[10m]) >= 4
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Upstream {{ $labels.backend }} keeps going dead and alive"
+          runbook: "RUNBOOK.md#tensorgatebackendflapping"
+
+      # Every upstream is out of rotation: clients get 503. The burn-rate alert needs minutes to
+      # notice this, so there is a direct rule.
+      - alert: TensorgateNoBackends
+        expr: sum(tensorgate_lb_backend_alive) == 0
+        for: 30s
+        labels:
+          severity: page
+        annotations:
+          summary: "Every upstream is dead, clients get 503"
+          runbook: "RUNBOOK.md#tensorgatenobackends"

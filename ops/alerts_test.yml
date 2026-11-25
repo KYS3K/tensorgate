@@ -1,0 +1,175 @@
+# Unit tests of the alert rules on made-up series. Run:  promtool test rules ops/alerts_test.yml
+rule_files:
+  - alerts.yml
+evaluation_interval: 1m
+
+tests:
+  # 10% of requests fail for 70 minutes: both windows are above 7.2%
+  - name: fast burn fires when 10% of requests fail for over an hour
+    interval: 1m
+    input_series:
+      - series: 'tensorgate_lb_requests_total{backend="a",class="2xx"}'
+        values: '0+900x80'
+      - series: 'tensorgate_lb_requests_total{backend="a",class="5xx"}'
+        values: '0+100x80'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TensorgateErrorBudgetFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "More than 7.2% of requests fail, the monthly error budget is burning 14x too fast"
+              runbook: "RUNBOOK.md#tensorgateerrorbudgetfastburn"
+
+  # 3% errors is a burn of 6x, not 14.4x: no page
+  - name: fast burn stays quiet at 3% errors
+    interval: 1m
+    input_series:
+      - series: 'tensorgate_lb_requests_total{backend="a",class="2xx"}'
+        values: '0+970x80'
+      - series: 'tensorgate_lb_requests_total{backend="a",class="5xx"}'
+        values: '0+30x80'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TensorgateErrorBudgetFastBurn
+        exp_alerts: []
+
+  # 3 minutes of total failure after an hour of good traffic: the 5 minute window is red (60%), but over the
+  # hour it is only 5%, below 7.2%. A short blip does not page; ten minutes of the same would (16%).
+  - name: fast burn ignores a 3 minute blip
+    interval: 1m
+    input_series:
+      - series: 'tensorgate_lb_requests_total{backend="a",class="2xx"}'
+        values: '0+1000x66 66000x3'
+      - series: 'tensorgate_lb_requests_total{backend="a",class="5xx"}'
+        values: '0x66 1000+1000x2'
+    alert_rule_test:
+      - eval_time: 69m
+        alertname: TensorgateErrorBudgetFastBurn
+        exp_alerts: []
+
+  - name: fast burn fires on a 10 minute outage
+    interval: 1m
+    input_series:
+      - series: 'tensorgate_lb_requests_total{backend="a",class="2xx"}'
+        values: '0+1000x60 60000x10'
+      - series: 'tensorgate_lb_requests_total{backend="a",class="5xx"}'
+        values: '0x60 1000+1000x9'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: TensorgateErrorBudgetFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "More than 7.2% of requests fail, the monthly error budget is burning 14x too fast"
+              runbook: "RUNBOOK.md#tensorgateerrorbudgetfastburn"
+
+  # clients that leave are not errors
+  - name: canceled requests are not errors
+    interval: 1m
+    input_series:
+      - series: 'tensorgate_lb_requests_total{backend="a",class="2xx"}'
+        values: '0+500x80'
+      - series: 'tensorgate_lb_requests_total{backend="a",class="canceled"}'
+        values: '0+500x80'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: TensorgateErrorBudgetFastBurn
+        exp_alerts: []
+
+  - name: ttft fires when p99 is above 500 ms
+    interval: 1m
+    input_series:
+      # 100 requests a minute, 5 of them slower than 1 s: p99 is above 500 ms
+      - series: 'tensorgate_lb_ttft_seconds_bucket{le="0.25"}'
+        values: '0+90x10'
+      - series: 'tensorgate_lb_ttft_seconds_bucket{le="0.5"}'
+        values: '0+95x10'
+      - series: 'tensorgate_lb_ttft_seconds_bucket{le="1"}'
+        values: '0+95x10'
+      - series: 'tensorgate_lb_ttft_seconds_bucket{le="+Inf"}'
+        values: '0+100x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: TensorgateTTFTHigh
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "p99 time to first byte is above 500 ms"
+              runbook: "RUNBOOK.md#tensorgatettfthigh"
+
+  - name: ttft is quiet when 99.5% of requests are fast
+    interval: 1m
+    input_series:
+      - series: 'tensorgate_lb_ttft_seconds_bucket{le="0.25"}'
+        values: '0+199x10'
+      - series: 'tensorgate_lb_ttft_seconds_bucket{le="0.5"}'
+        values: '0+200x10'
+      - series: 'tensorgate_lb_ttft_seconds_bucket{le="+Inf"}'
+        values: '0+200x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: TensorgateTTFTHigh
+        exp_alerts: []
+
+  - name: backend down fires after a minute and names the backend
+    interval: 15s
+    input_series:
+      - series: 'tensorgate_lb_backend_alive{backend="10.0.0.2:9002"}'
+        values: '1x8 0x30'
+      - series: 'tensorgate_lb_backend_alive{backend="10.0.0.2:9001"}'
+        values: '1x38'
+    alert_rule_test:
+      - eval_time: 90s
+        alertname: TensorgateBackendDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: TensorgateBackendDown
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              backend: "10.0.0.2:9002"
+            exp_annotations:
+              summary: "Upstream 10.0.0.2:9002 has been out of rotation for 1 minute"
+              runbook: "RUNBOOK.md#tensorgatebackenddown"
+
+  - name: no backends fires only when all are dead
+    interval: 15s
+    input_series:
+      - series: 'tensorgate_lb_backend_alive{backend="a"}'
+        values: '1x4 0x20'
+      - series: 'tensorgate_lb_backend_alive{backend="b"}'
+        values: '1x4 0x20'
+      - series: 'tensorgate_lb_backend_alive{backend="c"}'
+        values: '1x24'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: TensorgateNoBackends
+        exp_alerts: []
+
+  # the game day: upstream A was dead 5 s out of every 30 s for two minutes. TensorgateBackendDown stayed quiet
+  # (no death lasted a minute), this one must not.
+  - name: flapping fires on repeated short deaths and not on a single one
+    interval: 5s
+    input_series:
+      # alive for 25 s, dead for 5 s, repeated
+      - series: 'tensorgate_lb_backend_alive{backend="a"}'
+        values: '1x4 0 1x4 0 1x4 0 1x4 0 1x4 0'
+      - series: 'tensorgate_lb_backend_alive{backend="b"}'
+        values: '1x4 0 1x24'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: TensorgateBackendFlapping
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              backend: a
+            exp_annotations:
+              summary: "Upstream a keeps going dead and alive"
+              runbook: "RUNBOOK.md#tensorgatebackendflapping"
+      - eval_time: 1m
+        alertname: TensorgateBackendDown
+        exp_alerts: []
