@@ -38,7 +38,7 @@ Times are seconds after the load became steady (`t = 0` is 20:17:11 on the first
 | 135 | `TensorgateBackendDown` for B is *pending*; at 195 it fires (it waits one minute on purpose). |
 | 300 | B is started again. At 310 it is back (two good probes) and the alert clears. |
 | **420** | **Injected:** upstream C answers 700 ms late (still under the probe's 1 second limit). |
-| 420-600 | C stays alive the whole time: its health probes pass. **Traffic to C does not drop:** 4.3 requests/s against 4.4 and 4.45 for the others, and 266 open streams against 267. |
+| 420-600 | C stays alive the whole time: its health probes pass. **Traffic to C does not drop:** 4.3 requests/s against 4.4 and 4.6 for the others, and 266 open streams against 267. |
 | 490 | The 30-second p99 TTFT first goes above 0.5 s (peak 0.99 s). `TensorgateTTFTHigh` pending at 495, **fires at 555: 135 seconds after the injection.** |
 | 600 | C is fast again. The p99 is back under 0.5 s at 640, the alert clears at 760 (its 2-minute window has to empty first). |
 | **720** | **Injected:** upstream A answers 502 to half of the completions, `/healthz` stays fine. |
