@@ -57,7 +57,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	h.p.budget.deposit()
 
-	b := h.p.Pick()
+	key, hasKey := h.p.routeKey(body)
+	b, route := h.p.pickFor(key, hasKey, nil)
+	if route != "" {
+		h.metrics.LBRoute(route)
+	}
 	if b == nil {
 		h.unavailable(w)
 		h.metrics.LBRequestDone(noBackend, "no_backend")
@@ -87,7 +91,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !a.retry || r.Context().Err() != nil {
 			break
 		}
-		next := h.p.pick(tried)
+		next, route := h.p.pickFor(key, hasKey, tried)
+		if route != "" {
+			h.metrics.LBRoute(route)
+		}
 		if next == nil {
 			h.unavailable(rec)
 			break

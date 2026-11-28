@@ -74,6 +74,13 @@ func parseFlags() config {
 	flag.DurationVar(&l.RetryBudgetWindow, "lb-retry-budget-window", 0, "lb: window of the retry budget, whole seconds (default 10s)")
 	flag.IntVar(&l.RetryMinPerSec, "lb-retry-min-per-sec", 0,
 		"lb: retries per second allowed on top of the percentage, so a quiet gateway can still retry (default 1)")
+	flag.StringVar(&l.Balancing, "lb-balancing", "",
+		`lb: "lor" sends a request to the least loaded upstream, "prefix" sends requests that start with the same prompt to the same upstream, which has its KV cache (default "lor")`)
+	flag.IntVar(&l.PrefixBlockBytes, "lb-prefix-block-bytes", 0, "lb: prefix mode: size of one prompt block in bytes, only full blocks count (default 256)")
+	flag.IntVar(&l.PrefixBlocks, "lb-prefix-blocks", 0, "lb: prefix mode: how many blocks from the start of the prompt make the routing key (default 2)")
+	flag.Float64Var(&l.PrefixSlack, "lb-prefix-slack", 0,
+		"lb: prefix mode: an upstream takes requests until it carries (1+slack) times the average load, then the next one on the ring takes them; smaller spreads the load better, bigger reuses the cache more (default 0.25)")
+	flag.IntVar(&l.RingVnodes, "lb-ring-vnodes", 0, "lb: prefix mode: points of one upstream on the hash ring, more means a more even spread; changing it moves every key (default 150)")
 	flag.DurationVar(&c.lbRetryAfter, "lb-retry-after", 2*time.Second,
 		"lb: Retry-After of the 503 sent when every upstream is dead")
 	flag.DurationVar(&c.lbRetryAfterJitter, "lb-retry-after-jitter", time.Second,

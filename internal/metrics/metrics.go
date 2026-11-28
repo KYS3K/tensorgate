@@ -13,6 +13,16 @@ import (
 // LBNoBackend is the backend label of requests that never reached an upstream.
 const LBNoBackend = "-"
 
+// Results of choosing an upstream by the prompt prefix.
+const (
+	LBRouteHome     = "home"     // the upstream the prefix belongs to
+	LBRouteSpill    = "spill"    // the upstream it belongs to was over its load cap, dead or already tried, the next one on the ring took it
+	LBRouteNoKey    = "no_key"   // the request has no prefix worth caching, least-outstanding picked
+	LBRouteFallback = "fallback" // nobody on the ring was under the cap, least-outstanding picked
+)
+
+var LBRouteResults = []string{LBRouteHome, LBRouteSpill, LBRouteNoKey, LBRouteFallback}
+
 // LBClasses are the outcome classes of a request that reached an upstream.
 var LBClasses = []string{"2xx", "3xx", "4xx", "5xx", "canceled", "aborted"}
 
@@ -47,6 +57,7 @@ type Metrics struct {
 	lbTTFTSeconds          *prometheus.HistogramVec
 	lbRetriesTotal         prometheus.Counter
 	lbRetryBudgetExhausted prometheus.Counter
+	lbRouteTotal           *prometheus.CounterVec
 
 	// counters are resolved once: WithLabelValues on the request path would hash and look up a map every time
 	admissionAccepted    prometheus.Counter
@@ -115,6 +126,10 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name: "tensorgate_lb_retry_budget_exhausted_total",
 			Help: "Retries that were not made because the retry budget was used up.",
 		}),
+		lbRouteTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "tensorgate_lb_prefix_route_total",
+			Help: "Upstream choices made in prefix mode, by result: home (the upstream the prompt prefix belongs to), spill (it was over its load cap), no_key (no prefix to route by), fallback (nobody under the cap).",
+		}, []string{"result"}),
 		lbTTFTSeconds: factory.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "tensorgate_lb_ttft_seconds",
 			Help:    "Time from request arrival at the load balancer to the first byte of a 2xx response body written to the client, by upstream.",
@@ -125,6 +140,9 @@ func New(reg prometheus.Registerer) *Metrics {
 	// increase() cannot see that jump: it has no earlier sample to start from. So every series is created at 0.
 	for _, class := range []string{"no_backend", "4xx"} {
 		m.lbRequestsTotal.WithLabelValues(LBNoBackend, class)
+	}
+	for _, result := range LBRouteResults {
+		m.lbRouteTotal.WithLabelValues(result)
 	}
 	return m
 }
@@ -213,6 +231,14 @@ func (m *Metrics) LBRequestDone(backend, class string) {
 		return
 	}
 	m.lbRequestsTotal.WithLabelValues(backend, class).Inc()
+}
+
+// LBRoute counts one upstream choice made in prefix mode, result is one of LBRouteResults
+func (m *Metrics) LBRoute(result string) {
+	if m == nil {
+		return
+	}
+	m.lbRouteTotal.WithLabelValues(result).Inc()
 }
 
 func (m *Metrics) LBRetry() {

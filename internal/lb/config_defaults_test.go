@@ -1,6 +1,7 @@
 package lb
 
 import (
+	"math"
 	"reflect"
 	"testing"
 	"time"
@@ -25,6 +26,11 @@ func TestWithDefaults_FillsZeroValues(t *testing.T) {
 		RetryBudgetPercent:    defaultRetryBudgetPercent,
 		RetryBudgetWindow:     defaultRetryBudgetWindow,
 		RetryMinPerSec:        defaultRetryMinPerSec,
+		Balancing:             BalancingLOR,
+		PrefixBlockBytes:      defaultPrefixBlockBytes,
+		PrefixBlocks:          defaultPrefixBlocks,
+		PrefixSlack:           defaultPrefixSlack,
+		RingVnodes:            defaultRingVnodes,
 	}
 	if got.Upstreams != nil {
 		t.Errorf("Upstreams = %v, want nil", got.Upstreams)
@@ -52,6 +58,11 @@ func TestWithDefaults_KeepsExplicitValues(t *testing.T) {
 		RetryBudgetPercent:    11,
 		RetryBudgetWindow:     12 * time.Second,
 		RetryMinPerSec:        13,
+		Balancing:             BalancingPrefix,
+		PrefixBlockBytes:      14,
+		PrefixBlocks:          15,
+		PrefixSlack:           0.5,
+		RingVnodes:            16,
 	}
 	if got := in.withDefaults(); !reflect.DeepEqual(got, in) {
 		t.Errorf("withDefaults() overwrote explicit values: got %+v, want %+v", got, in)
@@ -101,6 +112,10 @@ func TestValidate(t *testing.T) {
 		{"timeout below interval", Config{CheckInterval: 2 * time.Second, CheckTimeout: time.Second}, false},
 		{"timeout equals interval", Config{CheckInterval: time.Second, CheckTimeout: time.Second}, true},
 		{"timeout above interval", Config{CheckInterval: time.Second, CheckTimeout: 2 * time.Second}, true},
+		{"prefix balancing", Config{Balancing: BalancingPrefix}.withDefaults(), false},
+		{"unknown balancing", Config{Balancing: "round-robin"}.withDefaults(), true},
+		{"slack is NaN", Config{PrefixSlack: math.NaN()}.withDefaults(), true},
+		{"slack is infinite", Config{PrefixSlack: math.Inf(1)}.withDefaults(), true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
